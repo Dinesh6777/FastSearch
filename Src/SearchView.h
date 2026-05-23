@@ -41,6 +41,7 @@ public:
         MESSAGE_HANDLER(WM_KEYDOWN, OnKeyDown)
         MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
         MESSAGE_HANDLER(WM_NTFS_INDEX_CHANGED, OnNtfsIndexChanged)
+        MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
         
         // Input control change handlers
         COMMAND_HANDLER(IDC_SEARCH_EDIT, EN_CHANGE, OnSearchChanged)
@@ -70,6 +71,7 @@ private:
     LRESULT OnSize(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     LRESULT OnTimer(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     LRESULT OnNtfsIndexChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+    LRESULT OnSetFocus(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     LRESULT OnKeyDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     LRESULT OnListViewKeyDown(int idCtrl, LPNMHDR pnmh, BOOL& bHandled);
     LRESULT OnListViewKeyDownMessage(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);

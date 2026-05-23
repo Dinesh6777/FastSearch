@@ -142,6 +142,12 @@ LRESULT CSearchView::OnNtfsIndexChanged(UINT uMsg, WPARAM wParam, LPARAM lParam,
     return 0;
 }
 
+LRESULT CSearchView::OnSetFocus(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+    m_searchEdit.SetFocus();
+    bHandled = TRUE;
+    return 0;
+}
+
 LRESULT CSearchView::OnFilterChanged(WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL& bHandled) {
     RunSearchInternal();
     return 0;

@@ -73,6 +73,7 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdL
     // Show and update frame
     wndMain.ShowWindow(nShowCmd);
     wndMain.UpdateWindow();
+    wndMain.SetFocus();
 
     // Block thread inside event loops until WM_QUIT is pushed
     int nRet = theLoop.Run();

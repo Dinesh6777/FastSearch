@@ -113,6 +113,16 @@ LRESULT CMainFrame::OnSize(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandl
     return 0;
 }
 
+LRESULT CMainFrame::OnSetFocus(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+    if (m_activeTabIndex != -1 && m_activeTabIndex < static_cast<int>(m_tabs.size())) {
+        if (m_tabs[m_activeTabIndex].View && m_tabs[m_activeTabIndex].View->IsWindow()) {
+            m_tabs[m_activeTabIndex].View->SetFocus();
+        }
+    }
+    bHandled = FALSE; // Let default focus processing complete
+    return 0;
+}
+
 LRESULT CMainFrame::OnTrayIcon(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
     if (lParam == WM_LBUTTONDBLCLK) {
         // Restore window on double click
