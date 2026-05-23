@@ -31,6 +31,9 @@ public:
     // Retrieves current view mode
     int GetViewMode() const { return m_viewMode; }
 
+    // Retrieves last search execution time in milliseconds
+    double GetLastSearchTimeMs() const { return m_lastSearchTimeMs; }
+
     BEGIN_MSG_MAP(CSearchView)
         MESSAGE_HANDLER(WM_CREATE, OnCreate)
         MESSAGE_HANDLER(WM_SIZE, OnSize)
@@ -108,6 +111,7 @@ private:
     std::wstring m_currentQuery;
     unsigned int m_columnMask;
     int m_viewMode;
+    double m_lastSearchTimeMs;
     
     // Sorting State
     int m_sortColumn; // -1 for none, or column index

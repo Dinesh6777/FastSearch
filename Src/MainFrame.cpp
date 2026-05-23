@@ -415,16 +415,36 @@ void CMainFrame::UpdateStatusText() {
     wssTotal << total;
 
     int foundCount = 0;
+    double searchTimeMs = 0.0;
     if (m_activeTabIndex != -1 && m_activeTabIndex < static_cast<int>(m_tabs.size())) {
         foundCount = m_tabs[m_activeTabIndex].View->GetResultCount();
+        searchTimeMs = m_tabs[m_activeTabIndex].View->GetLastSearchTimeMs();
     }
 
     std::wstringstream wssFound;
     wssFound.imbue(std::locale(""));
     wssFound << foundCount;
 
-    swprintf_s(buf, 256, L"%s objects found | Total Indexed: %s files and folders", 
-               wssFound.str().c_str(), wssTotal.str().c_str());
+    double searchTimeSecs = searchTimeMs / 1000.0;
+
+    wchar_t timeBuf[32];
+    swprintf_s(timeBuf, 32, L"%.3f", searchTimeSecs);
+    std::wstring timeStr(timeBuf);
+    while (timeStr.size() > 1 && timeStr.back() == L'0') {
+        timeStr.pop_back();
+    }
+    if (timeStr.back() == L'.') {
+        timeStr.pop_back();
+    }
+
+    // Use nice formatting for singular/plural "sec/secs"
+    if (timeStr == L"1") {
+        swprintf_s(buf, 256, L"%s objects found in 1 sec | Total Indexed: %s files and folders", 
+                   wssFound.str().c_str(), wssTotal.str().c_str());
+    } else {
+        swprintf_s(buf, 256, L"%s objects found in %s secs | Total Indexed: %s files and folders", 
+                   wssFound.str().c_str(), timeStr.c_str(), wssTotal.str().c_str());
+    }
     m_statusBar.SetText(0, buf);
 }
 

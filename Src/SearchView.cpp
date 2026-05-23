@@ -7,7 +7,7 @@
 
 CSearchView::CSearchView(Search::SearchEngine* searchEngine)
     : m_searchEngine(searchEngine), m_columnMask(COL_DEFAULT), m_sortColumn(-1), 
-      m_sortAscending(true), m_searchEdit(this, 1), m_listView(this, 2), m_viewMode(ID_VIEW_DETAILS) {
+      m_sortAscending(true), m_searchEdit(this, 1), m_listView(this, 2), m_viewMode(ID_VIEW_DETAILS), m_lastSearchTimeMs(0.0) {
 }
 
 CSearchView::~CSearchView() {
@@ -193,6 +193,8 @@ void CSearchView::UpdateColumns(unsigned int columnMask) {
 
 // Triggers search query on SearchEngine and displays results in virtual ListView
 void CSearchView::RunSearchInternal() {
+    auto startTime = std::chrono::high_resolution_clock::now();
+
     int len = m_searchEdit.GetWindowTextLength();
     std::wstring query;
     query.resize(len);
@@ -272,6 +274,9 @@ void CSearchView::RunSearchInternal() {
             return m_sortAscending ? res : !res;
         });
     }
+
+    auto endTime = std::chrono::high_resolution_clock::now();
+    m_lastSearchTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
 
     // Set virtual list items count. Controls virtual render loops.
     m_listView.SetItemCount(static_cast<int>(m_results.size()));
@@ -609,44 +614,54 @@ bool CSearchView::ExportResults(const std::wstring& filePath) {
 void CSearchView::SetViewMode(int mode) {
     m_viewMode = mode;
     HIMAGELIST hImgList = nullptr;
-    const IID iidImageList = { 0x46EB2DE8, 0xBE6F, 0x11d2, { 0xB8, 0x5B, 0x00, 0xC0, 0x4F, 0xC4, 0x94, 0xFD } }; // IID_IImageList
     
     if (mode == ID_VIEW_DETAILS) {
         m_listView.ModifyStyle(LVS_TYPEMASK, LVS_REPORT, SWP_FRAMECHANGED);
-        ::SHGetImageList(SHIL_SMALL, iidImageList, (void**)&hImgList);
-        if (hImgList) {
+        HRESULT hr = ::SHGetImageList(SHIL_SMALL, IID_IImageList, (void**)&hImgList);
+        if (SUCCEEDED(hr) && hImgList) {
             m_listView.SetImageList(hImgList, LVSIL_SMALL);
         }
     }
     else if (mode == ID_VIEW_SMALL_ICONS) {
         m_listView.ModifyStyle(LVS_TYPEMASK, LVS_SMALLICON, SWP_FRAMECHANGED);
-        ::SHGetImageList(SHIL_SMALL, iidImageList, (void**)&hImgList);
-        if (hImgList) {
+        HRESULT hr = ::SHGetImageList(SHIL_SMALL, IID_IImageList, (void**)&hImgList);
+        if (SUCCEEDED(hr) && hImgList) {
             m_listView.SetImageList(hImgList, LVSIL_SMALL);
         }
     }
     else if (mode == ID_VIEW_MEDIUM_ICONS) {
         m_listView.ModifyStyle(LVS_TYPEMASK, LVS_ICON, SWP_FRAMECHANGED);
-        ::SHGetImageList(SHIL_LARGE, iidImageList, (void**)&hImgList);
-        if (hImgList) {
+        HRESULT hr = ::SHGetImageList(SHIL_LARGE, IID_IImageList, (void**)&hImgList);
+        if (SUCCEEDED(hr) && hImgList) {
             m_listView.SetImageList(hImgList, LVSIL_NORMAL);
             m_listView.SetIconSpacing(76, 76);
         }
     }
     else if (mode == ID_VIEW_LARGE_ICONS) {
         m_listView.ModifyStyle(LVS_TYPEMASK, LVS_ICON, SWP_FRAMECHANGED);
-        ::SHGetImageList(SHIL_EXTRALARGE, iidImageList, (void**)&hImgList);
-        if (hImgList) {
+        HRESULT hr = ::SHGetImageList(SHIL_EXTRALARGE, IID_IImageList, (void**)&hImgList);
+        if (FAILED(hr) || !hImgList) {
+            // Fallback to SHIL_LARGE (Medium icons) if EXTRALARGE fails
+            hr = ::SHGetImageList(SHIL_LARGE, IID_IImageList, (void**)&hImgList);
+        }
+        if (SUCCEEDED(hr) && hImgList) {
             m_listView.SetImageList(hImgList, LVSIL_NORMAL);
             m_listView.SetIconSpacing(100, 100);
         }
     }
     else if (mode == ID_VIEW_EXTRA_LARGE_ICONS) {
         m_listView.ModifyStyle(LVS_TYPEMASK, LVS_ICON, SWP_FRAMECHANGED);
-        ::SHGetImageList(SHIL_JUMBO, iidImageList, (void**)&hImgList);
-        if (hImgList) {
+        HRESULT hr = ::SHGetImageList(SHIL_JUMBO, IID_IImageList, (void**)&hImgList);
+        if (FAILED(hr) || !hImgList) {
+            // Fallback to SHIL_EXTRALARGE (Large icons) or SHIL_LARGE (Medium icons)
+            hr = ::SHGetImageList(SHIL_EXTRALARGE, IID_IImageList, (void**)&hImgList);
+            if (FAILED(hr) || !hImgList) {
+                hr = ::SHGetImageList(SHIL_LARGE, IID_IImageList, (void**)&hImgList);
+            }
+        }
+        if (SUCCEEDED(hr) && hImgList) {
             m_listView.SetImageList(hImgList, LVSIL_NORMAL);
-            m_listView.SetIconSpacing(180, 180);
+            m_listView.SetIconSpacing(270, 290);
         }
     }
 
@@ -805,6 +820,12 @@ LRESULT CSearchView::OnCustomDraw(int idCtrl, LPNMHDR pnmh, BOOL& bHandled) {
     LPNMLVCUSTOMDRAW pLVCD = reinterpret_cast<LPNMLVCUSTOMDRAW>(pnmh);
     bHandled = TRUE;
 
+    // Return default drawing immediately if we are not in details (report) view mode
+    DWORD dwStyle = m_listView.GetWindowLong(GWL_STYLE);
+    if ((dwStyle & LVS_TYPEMASK) != LVS_REPORT) {
+        return CDRF_DODEFAULT;
+    }
+
     switch (pLVCD->nmcd.dwDrawStage) {
         case CDDS_PREPAINT:
             return CDRF_NOTIFYITEMDRAW;
@@ -818,12 +839,6 @@ LRESULT CSearchView::OnCustomDraw(int idCtrl, LPNMHDR pnmh, BOOL& bHandled) {
 
             if (itemIdx < 0 || itemIdx >= static_cast<int>(m_results.size()) ||
                 subItemIdx < 0 || subItemIdx >= static_cast<int>(m_visibleColumns.size())) {
-                return CDRF_DODEFAULT;
-            }
-
-            // Return default drawing if we are not in details (report) view mode
-            DWORD dwStyle = m_listView.GetWindowLong(GWL_STYLE);
-            if ((dwStyle & LVS_TYPEMASK) != LVS_REPORT) {
                 return CDRF_DODEFAULT;
             }
 
