@@ -59,6 +59,8 @@ public:
     ALT_MSG_MAP(1) // Map m_searchEdit subclassed messages
         MESSAGE_HANDLER(WM_CHAR, OnEditChar)
         MESSAGE_HANDLER(WM_KEYDOWN, OnEditKeyDown)
+        MESSAGE_HANDLER(WM_SETFOCUS, OnEditSetFocus)
+        MESSAGE_HANDLER(WM_LBUTTONDOWN, OnEditLButtonDown)
     ALT_MSG_MAP(2) // Map m_listView subclassed keyboard events (100% robust hotkeys)
         MESSAGE_HANDLER(WM_KEYDOWN, OnListViewKeyDownMessage)
     END_MSG_MAP()
@@ -75,6 +77,8 @@ private:
     LRESULT OnContextMenu(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     LRESULT OnEditChar(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
     LRESULT OnEditKeyDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+    LRESULT OnEditSetFocus(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+    LRESULT OnEditLButtonDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
 
     void CopySelection(bool isCut);
 

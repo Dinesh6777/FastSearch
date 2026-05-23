@@ -778,6 +778,23 @@ LRESULT CSearchView::OnEditKeyDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL
     return 0;
 }
 
+LRESULT CSearchView::OnEditSetFocus(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+    m_searchEdit.SetSel(0, -1);
+    bHandled = FALSE; // Let default edit control window proc handle the rest
+    return 0;
+}
+
+LRESULT CSearchView::OnEditLButtonDown(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+    if (::GetFocus() != m_searchEdit.m_hWnd) {
+        m_searchEdit.SetFocus();
+        m_searchEdit.SetSel(0, -1);
+        bHandled = TRUE; // Prevent mouse down from clearing selection
+        return 0;
+    }
+    bHandled = FALSE; // Already focused, allow normal caret positioning
+    return 0;
+}
+
 LRESULT CSearchView::OnListViewKeyDownMessage(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
     bHandled = FALSE;
     int key = static_cast<int>(wParam);
