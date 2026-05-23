@@ -4,10 +4,94 @@
 
 namespace Ntfs {
 
+    // A lightweight 8-byte string class replacing std::wstring (40 bytes) to save index memory.
+    class CompactString {
+    public:
+        CompactString() : m_str(nullptr) {}
+        ~CompactString() { delete[] m_str; }
+
+        CompactString(const CompactString&) = delete;
+        CompactString& operator=(const CompactString&) = delete;
+
+        CompactString(CompactString&& other) noexcept : m_str(other.m_str) {
+            other.m_str = nullptr;
+        }
+
+        CompactString& operator=(CompactString&& other) noexcept {
+            if (this != &other) {
+                delete[] m_str;
+                m_str = other.m_str;
+                other.m_str = nullptr;
+            }
+            return *this;
+        }
+
+        CompactString& operator=(const std::wstring& s) {
+            delete[] m_str;
+            if (!s.empty()) {
+                size_t len = s.length();
+                m_str = new wchar_t[len + 1];
+                wcscpy_s(m_str, len + 1, s.c_str());
+            } else {
+                m_str = nullptr;
+            }
+            return *this;
+        }
+
+        CompactString& operator=(const wchar_t* s) {
+            delete[] m_str;
+            if (s && s[0] != L'\0') {
+                size_t len = wcslen(s);
+                m_str = new wchar_t[len + 1];
+                wcscpy_s(m_str, len + 1, s);
+            } else {
+                m_str = nullptr;
+            }
+            return *this;
+        }
+
+        const wchar_t* c_str() const { return m_str ? m_str : L""; }
+        size_t size() const { return m_str ? wcslen(m_str) : 0; }
+        size_t length() const { return size(); }
+        bool empty() const { return !m_str || m_str[0] == L'\0'; }
+
+        wchar_t operator[](size_t index) const {
+            return m_str ? m_str[index] : L'\0';
+        }
+
+        // Iterator support
+        const wchar_t* begin() const { return c_str(); }
+        const wchar_t* end() const { return c_str() + length(); }
+
+        // Conversion to std::wstring
+        operator std::wstring() const { return c_str(); }
+
+        // Comparison operators
+        bool operator==(const CompactString& other) const { return wcscmp(c_str(), other.c_str()) == 0; }
+        bool operator!=(const CompactString& other) const { return wcscmp(c_str(), other.c_str()) != 0; }
+        bool operator<(const CompactString& other) const { return wcscmp(c_str(), other.c_str()) < 0; }
+
+        bool operator==(const std::wstring& other) const { return wcscmp(c_str(), other.c_str()) == 0; }
+        bool operator!=(const std::wstring& other) const { return wcscmp(c_str(), other.c_str()) != 0; }
+
+        bool operator==(const wchar_t* other) const { return wcscmp(c_str(), other ? other : L"") == 0; }
+        bool operator!=(const wchar_t* other) const { return wcscmp(c_str(), other ? other : L"") != 0; }
+
+        std::wstring operator+(const wchar_t* other) const {
+            return std::wstring(c_str()) + (other ? other : L"");
+        }
+        std::wstring operator+(const std::wstring& other) const {
+            return std::wstring(c_str()) + other;
+        }
+
+    private:
+        wchar_t* m_str;
+    };
+
     // Represents a single file or directory record stored in the memory index.
     // Specifying fields with compact alignment.
     struct FileRecord {
-        std::wstring Name;
+        CompactString Name;
         unsigned int ParentFrs = 0xFFFFFFFF;
         unsigned long long Size = 0;
         unsigned long long SizeOnDisk = 0;
