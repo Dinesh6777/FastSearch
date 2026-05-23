@@ -13,7 +13,7 @@ enum ColumnFlags {
     COL_ACCESSED = 1 << 6,
     COL_ATTRIBUTES = 1 << 7,
     
-    COL_DEFAULT = COL_NAME | COL_PATH | COL_SIZE | COL_SIZE_DISK | COL_MODIFIED
+    COL_DEFAULT = COL_NAME | COL_PATH | COL_SIZE | COL_MODIFIED
 };
 
 // class CSettingsDialog

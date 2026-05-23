@@ -57,6 +57,11 @@ LRESULT CMainFrame::OnCreate(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHan
         ::CheckMenuRadioItem(hMenu, ID_VIEW_DETAILS, ID_VIEW_EXTRA_LARGE_ICONS, ID_VIEW_DETAILS, MF_BYCOMMAND);
     }
 
+    // Resize the client area of the main window so that the horizontal width
+    // perfectly fits the 4 active columns (Name: 220, Path: 320, Size: 90, Date Modified: 130 = 760px)
+    // plus a small 20px padding margin for scrollbars, total = 780px.
+    ResizeClient(780, 550);
+
     // Re-flow frame layouts
     RECT rc;
     GetClientRect(&rc);
