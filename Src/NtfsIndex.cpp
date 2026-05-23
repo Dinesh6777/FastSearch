@@ -45,7 +45,8 @@ namespace Ntfs {
                 continue; // Skip record if fixup check fails (corrupt or partial record)
             }
 
-            FileRecord& item = m_records[i];
+            m_records[i] = std::make_unique<FileRecord>();
+            FileRecord& item = *m_records[i];
             item.IsDirectory = (frsh->Flags & FRH_DIRECTORY) != 0;
 
             // Iterate attributes inside this FRS
@@ -120,47 +121,55 @@ namespace Ntfs {
                 attr = attr->next();
             }
 
-            // Process collected names for hard links
+            // Process collected names (only primary Win32/POSIX, fallback to DOS)
+            std::wstring primaryName;
+            unsigned int primaryParent = 0xFFFFFFFF;
             std::wstring dosName;
             unsigned int dosParent = 0xFFFFFFFF;
 
             for (const auto& fn : fileNames) {
-                // Namespace filtering:
-                // 0 = POSIX, 1 = Win32 (LFN), 2 = DOS (8.3 alias), 3 = Win32 & DOS (both same)
-                // Discard DOS-only 8.3 short-names (flags == 2) to avoid duplicates, unless it is the only name.
                 if (fn.NamespaceFlags == 2) {
                     if (dosName.empty()) {
                         dosName = fn.Name;
                         dosParent = fn.ParentFrs;
                     }
                 } else {
-                    item.Names.push_back({ fn.Name, fn.ParentFrs });
+                    if (primaryName.empty()) {
+                        primaryName = fn.Name;
+                        primaryParent = fn.ParentFrs;
+                    }
                 }
             }
 
-            // Fallback to DOS name if no Win32/POSIX names exist
-            if (item.Names.empty() && !dosName.empty()) {
-                item.Names.push_back({ dosName, dosParent });
+            if (!primaryName.empty()) {
+                item.Name = primaryName;
+                item.ParentFrs = primaryParent;
+            } else if (!dosName.empty()) {
+                item.Name = dosName;
+                item.ParentFrs = dosParent;
             }
 
             // Update stats
-            if (!item.Names.empty()) {
-                const auto& primary = item.Names[0];
-                if (primary.ParentFrs != 0xFFFFFFFF) {
-                    if (item.IsDirectory) {
-                        m_totalFolders++;
-                    } else {
-                        m_totalFiles++;
-                    }
+            if (!item.Name.empty() && item.ParentFrs != 0xFFFFFFFF) {
+                if (item.IsDirectory) {
+                    m_totalFolders++;
+                } else {
+                    m_totalFiles++;
                 }
+            } else {
+                // If the record has no valid name, we don't need to keep it allocated on the heap!
+                m_records[i].reset();
             }
         }
 
         // Hardcode standard root directory (FRS 5) representation
         if (5 < m_records.size()) {
-            m_records[5].Names.clear();
-            m_records[5].Names.push_back({ L"", 5 });
-            m_records[5].IsDirectory = true;
+            if (!m_records[5]) {
+                m_records[5] = std::make_unique<FileRecord>();
+            }
+            m_records[5]->Name = L"";
+            m_records[5]->ParentFrs = 5;
+            m_records[5]->IsDirectory = true;
         }
 
         // Temporarily log the first 50 non-empty indexed files to check for corruption
@@ -169,9 +178,9 @@ namespace Ntfs {
             fwprintf(fBuildLog, L"First 50 Indexed Names:\n");
             int loggedCount = 0;
             for (size_t k = 0; k < m_records.size() && loggedCount < 50; ++k) {
-                if (!m_records[k].Names.empty()) {
-                    fwprintf(fBuildLog, L"  FRS [%zu]: IsDir=%d, NamesCount=%zu, PrimaryName='%s'\n", 
-                             k, m_records[k].IsDirectory, m_records[k].Names.size(), m_records[k].Names[0].Name.c_str());
+                if (m_records[k] && !m_records[k]->Name.empty()) {
+                    fwprintf(fBuildLog, L"  FRS [%zu]: IsDir=%d, PrimaryName='%s'\n", 
+                             k, m_records[k]->IsDirectory, m_records[k]->Name.c_str());
                     loggedCount++;
                 }
             }
@@ -195,20 +204,19 @@ namespace Ntfs {
         int depth = 0;
         // Keep tracing parent references upwards
         while (current < m_records.size() && current != 5 && current != 0 && depth < 256) {
-            const FileRecord& rec = m_records[current];
-            if (rec.Names.empty()) {
+            const auto& pRec = m_records[current];
+            if (!pRec || pRec->Name.empty()) {
                 break;
             }
-            const auto& fn = rec.Names[0]; // Directories and primary names have unique paths
-            if (fn.ParentFrs == 0xFFFFFFFF || fn.ParentFrs == current) {
+            if (pRec->ParentFrs == 0xFFFFFFFF || pRec->ParentFrs == current) {
                 break;
             }
             if (path.empty()) {
-                path = fn.Name;
+                path = pRec->Name;
             } else {
-                path = fn.Name + L"\\" + path;
+                path = pRec->Name + L"\\" + path;
             }
-            current = fn.ParentFrs;
+            current = pRec->ParentFrs;
             depth++;
         }
 
@@ -229,20 +237,19 @@ namespace Ntfs {
         int depth = 0;
         // Keep tracing parent references upwards
         while (current < m_records.size() && current != 5 && current != 0 && depth < 256) {
-            const FileRecord& rec = m_records[current];
-            if (rec.Names.empty()) {
+            const auto& pRec = m_records[current];
+            if (!pRec || pRec->Name.empty()) {
                 break;
             }
-            const auto& fn = rec.Names[0];
-            if (fn.ParentFrs == 0xFFFFFFFF || fn.ParentFrs == current) {
+            if (pRec->ParentFrs == 0xFFFFFFFF || pRec->ParentFrs == current) {
                 break;
             }
             if (path.empty()) {
-                path = fn.Name;
+                path = pRec->Name;
             } else {
-                path = fn.Name + L"\\" + path;
+                path = pRec->Name + L"\\" + path;
             }
-            current = fn.ParentFrs;
+            current = pRec->ParentFrs;
             depth++;
         }
 
@@ -264,16 +271,19 @@ namespace Ntfs {
             m_records.resize(recordIndex + 1024); // grow buffer in batches
         }
 
-        FileRecord& item = m_records[recordIndex];
+        if (!m_records[recordIndex]) {
+            m_records[recordIndex] = std::make_unique<FileRecord>();
+        }
+        FileRecord& item = *m_records[recordIndex];
         
         // Update stats
-        if (!item.Names.empty()) {
+        if (!item.Name.empty()) {
             if (item.IsDirectory) m_totalFolders--;
             else m_totalFiles--;
         }
 
-        item.Names.clear();
-        item.Names.push_back({ name, parentFrs });
+        item.Name = name;
+        item.ParentFrs = parentFrs;
         item.Size = size;
         item.SizeOnDisk = sizeOnDisk;
         item.DateModified = dateModified;
@@ -292,13 +302,13 @@ namespace Ntfs {
     void NtfsIndex::DeleteRecord(unsigned int recordIndex) {
         LockExclusive();
 
-        if (recordIndex < m_records.size()) {
-            FileRecord& item = m_records[recordIndex];
-            if (!item.Names.empty()) {
+        if (recordIndex < m_records.size() && m_records[recordIndex]) {
+            FileRecord& item = *m_records[recordIndex];
+            if (!item.Name.empty()) {
                 if (item.IsDirectory) m_totalFolders--;
                 else m_totalFiles--;
             }
-            item.Names.clear(); // Mark as unallocated/inactive
+            m_records[recordIndex].reset(); // Free the memory instantly
         }
 
         UnlockExclusive();

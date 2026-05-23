@@ -38,9 +38,8 @@ LRESULT CMainFrame::OnCreate(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHan
     m_searchEngine.RegisterNotifyWindow(m_hWnd);
     m_searchEngine.InitializeDrives(this);
 
-    // 4. Create default 2 tabs
+    // 4. Create default 1 tab (users can dynamically add more via '+' tab)
     CreateNewTab(L"Search 1");
-    CreateNewTab(L"Search 2");
 
     // 5. Append "+" tab at the end of tab control to act as the add button
     TCITEMW plusItem = { 0 };

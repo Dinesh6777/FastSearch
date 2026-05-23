@@ -10,16 +10,7 @@ namespace Search {
     // Stores lightweight references and indices to avoid deep copying of string names.
     struct SearchResult {
         unsigned int RecordIndex;
-        unsigned int ParentFrs;
         wchar_t Drive;
-        std::wstring Name;
-        unsigned long long Size;
-        unsigned long long SizeOnDisk;
-        unsigned long long DateModified;
-        unsigned long long DateCreated;
-        unsigned long long DateAccessed;
-        unsigned int Attributes;
-        bool IsDirectory;
     };
 
     // Filter index matches for quick selections (Everything-like filters)
@@ -66,6 +57,13 @@ namespace Search {
 
         // Resolves full path for a search result
         std::wstring GetResultFullPath(const SearchResult& result) const;
+
+        // Thread-safe drive lock helpers
+        void LockDrivesShared() const;
+        void UnlockDrivesShared() const;
+
+        // Unsafe raw record retrieval (MUST call LockDrivesShared first!)
+        const Ntfs::FileRecord* GetRecordUnsafe(wchar_t driveLetter, unsigned int recordIndex) const;
 
         // Retrieves the active query matcher for custom drawing highlights
         const StringMatcher& GetLastMatcher() const { return m_lastMatcher; }

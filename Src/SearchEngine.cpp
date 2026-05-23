@@ -140,53 +140,66 @@ namespace Search {
                 const auto& item = records[i];
 
                 // Skip unallocated records
-                if (item.Names.empty()) {
+                if (!item || item->Name.empty() || item->ParentFrs == 0xFFFFFFFF) {
                     continue;
                 }
 
-                // Iterate all names/hard links for this record
-                for (const auto& fn : item.Names) {
-                    if (fn.ParentFrs == 0xFFFFFFFF || fn.Name.empty()) {
-                        continue;
-                    }
+                // Apply Everything-style quick filters (Documents, Pictures, Executables, etc.)
+                if (!FilePassesFilter(item->Name, item->IsDirectory, filter)) {
+                    continue;
+                }
 
-                    // Apply Everything-style quick filters (Documents, Pictures, Executables, etc.)
-                    if (!FilePassesFilter(fn.Name, item.IsDirectory, filter)) {
-                        continue;
-                    }
+                // Perform pattern string matching
+                if (m_lastMatcher.Matches(item->Name)) {
+                    SearchResult res;
+                    res.RecordIndex = i;
+                    res.Drive = driveLetter;
 
-                    // Perform pattern string matching
-                    if (m_lastMatcher.Matches(fn.Name)) {
-                        SearchResult res;
-                        res.RecordIndex = i;
-                        res.ParentFrs = fn.ParentFrs;
-                        res.Drive = driveLetter;
-                        res.Name = fn.Name;
-                        res.Size = item.Size;
-                        res.SizeOnDisk = item.SizeOnDisk;
-                        res.DateModified = item.DateModified;
-                        res.DateCreated = item.DateCreated;
-                        res.DateAccessed = item.DateAccessed;
-                        res.Attributes = item.Attributes;
-                        res.IsDirectory = item.IsDirectory;
-
-                        outResults.push_back(res);
-                    }
+                    outResults.push_back(res);
                 }
             }
 
             drive.Index->UnlockShared();
         }
+        outResults.shrink_to_fit();
     }
 
     std::wstring SearchEngine::GetResultFullPath(const SearchResult& result) const {
         std::lock_guard<std::mutex> lock(m_searchMutex);
         for (const auto& drive : m_drives) {
             if (drive.Index->GetDriveLetter() == result.Drive) {
-                return drive.Index->ResolveFullPath(result.ParentFrs, result.Name);
+                return drive.Index->ResolveFullPath(result.RecordIndex);
             }
         }
         return L"";
+    }
+
+    void SearchEngine::LockDrivesShared() const {
+        std::lock_guard<std::mutex> lock(m_searchMutex);
+        for (const auto& drive : m_drives) {
+            drive.Index->LockShared();
+        }
+    }
+
+    void SearchEngine::UnlockDrivesShared() const {
+        std::lock_guard<std::mutex> lock(m_searchMutex);
+        for (const auto& drive : m_drives) {
+            drive.Index->UnlockShared();
+        }
+    }
+
+    const Ntfs::FileRecord* SearchEngine::GetRecordUnsafe(wchar_t driveLetter, unsigned int recordIndex) const {
+        // Assume caller holds the shared lock via LockDrivesShared!
+        for (const auto& drive : m_drives) {
+            if (drive.Index->GetDriveLetter() == driveLetter) {
+                const auto& records = drive.Index->GetRecordsInternal();
+                if (recordIndex < records.size()) {
+                    return records[recordIndex].get();
+                }
+                break;
+            }
+        }
+        return nullptr;
     }
 
     size_t SearchEngine::GetTotalIndexedFiles() const {

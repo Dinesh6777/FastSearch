@@ -231,9 +231,12 @@ void CSearchView::RunSearchInternal() {
     m_results.clear();
     m_searchEngine->ExecuteSearch(query, mode, driveLetter, filter, m_results);
 
+    m_searchEngine->LockDrivesShared();
+
     // Stable partition: move all items starting with '$' to the end (least preference)
-    std::stable_partition(m_results.begin(), m_results.end(), [](const Search::SearchResult& res) {
-        return res.Name.empty() || res.Name[0] != L'$';
+    std::stable_partition(m_results.begin(), m_results.end(), [this](const Search::SearchResult& res) {
+        const auto* record = m_searchEngine->GetRecordUnsafe(res.Drive, res.RecordIndex);
+        return !record || record->Name.empty() || record->Name[0] != L'$';
     });
 
     // Reapply sorting if enabled
@@ -242,8 +245,15 @@ void CSearchView::RunSearchInternal() {
         int flag = m_visibleColumns[m_sortColumn].subitemIndex;
         
         std::sort(m_results.begin(), m_results.end(), [this, flag](const Search::SearchResult& a, const Search::SearchResult& b) {
-            bool aStartsWithDollar = (!a.Name.empty() && a.Name[0] == L'$');
-            bool bStartsWithDollar = (!b.Name.empty() && b.Name[0] == L'$');
+            const auto* recA = m_searchEngine->GetRecordUnsafe(a.Drive, a.RecordIndex);
+            const auto* recB = m_searchEngine->GetRecordUnsafe(b.Drive, b.RecordIndex);
+
+            if (!recA && !recB) return false;
+            if (!recA) return false;
+            if (!recB) return true;
+
+            bool aStartsWithDollar = (!recA->Name.empty() && recA->Name[0] == L'$');
+            bool bStartsWithDollar = (!recB->Name.empty() && recB->Name[0] == L'$');
             
             if (aStartsWithDollar != bStartsWithDollar) {
                 return aStartsWithDollar < bStartsWithDollar; // Always keep '$' prefixed files at the end
@@ -252,34 +262,36 @@ void CSearchView::RunSearchInternal() {
             bool res = false;
             switch (flag) {
                 case COL_NAME:
-                    res = _wcsicmp(a.Name.c_str(), b.Name.c_str()) < 0;
+                    res = _wcsicmp(recA->Name.c_str(), recB->Name.c_str()) < 0;
                     break;
                 case COL_PATH:
                     if (a.Drive != b.Drive) res = a.Drive < b.Drive;
                     else res = a.RecordIndex < b.RecordIndex;
                     break;
                 case COL_SIZE:
-                    res = a.Size < b.Size;
+                    res = recA->Size < recB->Size;
                     break;
                 case COL_SIZE_DISK:
-                    res = a.SizeOnDisk < b.SizeOnDisk;
+                    res = recA->SizeOnDisk < recB->SizeOnDisk;
                     break;
                 case COL_MODIFIED:
-                    res = a.DateModified < b.DateModified;
+                    res = recA->DateModified < recB->DateModified;
                     break;
                 case COL_CREATED:
-                    res = a.DateCreated < b.DateCreated;
+                    res = recA->DateCreated < recB->DateCreated;
                     break;
                 case COL_ACCESSED:
-                    res = a.DateAccessed < b.DateAccessed;
+                    res = recA->DateAccessed < recB->DateAccessed;
                     break;
                 case COL_ATTRIBUTES:
-                    res = a.Attributes < b.Attributes;
+                    res = recA->Attributes < recB->Attributes;
                     break;
             }
             return m_sortAscending ? res : !res;
         });
     }
+
+    m_searchEngine->UnlockDrivesShared();
 
     auto endTime = std::chrono::high_resolution_clock::now();
     m_lastSearchTimeMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
@@ -304,6 +316,13 @@ LRESULT CSearchView::OnGetDispInfo(int idCtrl, LPNMHDR pnmh, BOOL& bHandled) {
 
     const auto& res = m_results[idx];
 
+    m_searchEngine->LockDrivesShared();
+    const auto* record = m_searchEngine->GetRecordUnsafe(res.Drive, res.RecordIndex);
+    if (!record) {
+        m_searchEngine->UnlockDrivesShared();
+        return 0;
+    }
+
     // 1. Text request
     if (pDispInfo->item.mask & LVIF_TEXT) {
         int subItem = pDispInfo->item.iSubItem;
@@ -313,32 +332,32 @@ LRESULT CSearchView::OnGetDispInfo(int idCtrl, LPNMHDR pnmh, BOOL& bHandled) {
 
             switch (flag) {
                 case COL_NAME:
-                    str = res.Name;
+                    str = record->Name;
                     break;
                 case COL_PATH:
                     str = m_searchEngine->GetResultFullPath(res);
                     // Strip the filename from full path to show parent directory only
-                    if (str.size() > res.Name.size() + 1) {
-                        str = str.substr(0, str.size() - res.Name.size() - 1);
+                    if (str.size() > record->Name.size() + 1) {
+                        str = str.substr(0, str.size() - record->Name.size() - 1);
                     }
                     break;
                 case COL_SIZE:
-                    str = res.IsDirectory ? L"" : FormatFileSize(res.Size);
+                    str = record->IsDirectory ? L"" : FormatFileSize(record->Size);
                     break;
                 case COL_SIZE_DISK:
-                    str = res.IsDirectory ? L"" : FormatFileSize(res.SizeOnDisk);
+                    str = record->IsDirectory ? L"" : FormatFileSize(record->SizeOnDisk);
                     break;
                 case COL_MODIFIED:
-                    str = FormatFileTime(res.DateModified);
+                    str = FormatFileTime(record->DateModified);
                     break;
                 case COL_CREATED:
-                    str = FormatFileTime(res.DateCreated);
+                    str = FormatFileTime(record->DateCreated);
                     break;
                 case COL_ACCESSED:
-                    str = FormatFileTime(res.DateAccessed);
+                    str = FormatFileTime(record->DateAccessed);
                     break;
                 case COL_ATTRIBUTES:
-                    str = FormatAttributes(res.Attributes);
+                    str = FormatAttributes(record->Attributes);
                     break;
             }
 
@@ -349,7 +368,7 @@ LRESULT CSearchView::OnGetDispInfo(int idCtrl, LPNMHDR pnmh, BOOL& bHandled) {
     // 2. Icon request (uses cached shell image attributes without hitting physical disk)
     if (pDispInfo->item.mask & LVIF_IMAGE) {
         SHFILEINFOW sfiLocal;
-        DWORD attribs = res.IsDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+        DWORD attribs = record->IsDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
         
         DWORD dwStyle = m_listView.GetWindowLong(GWL_STYLE);
         DWORD dwView = dwStyle & LVS_TYPEMASK;
@@ -361,9 +380,11 @@ LRESULT CSearchView::OnGetDispInfo(int idCtrl, LPNMHDR pnmh, BOOL& bHandled) {
         }
 
         // SHGFI_USEFILEATTRIBUTES avoids disk seek completely
-        SHGetFileInfoW(res.Name.c_str(), attribs, &sfiLocal, sizeof(sfiLocal), iconFlags);
+        SHGetFileInfoW(record->Name.c_str(), attribs, &sfiLocal, sizeof(sfiLocal), iconFlags);
         pDispInfo->item.iImage = sfiLocal.iIcon;
     }
+
+    m_searchEngine->UnlockDrivesShared();
 
     return 0;
 }
@@ -599,19 +620,26 @@ bool CSearchView::ExportResults(const std::wstring& filePath) {
              escapeVal(L"Size on Disk").c_str(), sep,
              escapeVal(L"Date Modified").c_str());
 
+    m_searchEngine->LockDrivesShared();
+
     for (const auto& res : m_results) {
+        const auto* record = m_searchEngine->GetRecordUnsafe(res.Drive, res.RecordIndex);
+        if (!record) continue;
+
         std::wstring fullPath = m_searchEngine->GetResultFullPath(res);
-        std::wstring sizeStr = res.IsDirectory ? L"" : FormatFileSize(res.Size);
-        std::wstring sizeDiskStr = res.IsDirectory ? L"" : FormatFileSize(res.SizeOnDisk);
-        std::wstring modStr = FormatFileTime(res.DateModified);
+        std::wstring sizeStr = record->IsDirectory ? L"" : FormatFileSize(record->Size);
+        std::wstring sizeDiskStr = record->IsDirectory ? L"" : FormatFileSize(record->SizeOnDisk);
+        std::wstring modStr = FormatFileTime(record->DateModified);
 
         fwprintf(file, L"%s%c%s%c%s%c%s%c%s\n", 
-                 escapeVal(res.Name).c_str(), sep,
+                 escapeVal(record->Name).c_str(), sep,
                  escapeVal(fullPath).c_str(), sep,
                  escapeVal(sizeStr).c_str(), sep,
                  escapeVal(sizeDiskStr).c_str(), sep,
                  escapeVal(modStr).c_str());
     }
+
+    m_searchEngine->UnlockDrivesShared();
 
     fclose(file);
     return true;
@@ -889,9 +917,16 @@ LRESULT CSearchView::OnCustomDraw(int idCtrl, LPNMHDR pnmh, BOOL& bHandled) {
 
                 // Get shell icon index (matches exactly how we retrieve it in OnGetDispInfo)
                 const auto& res = m_results[itemIdx];
+                m_searchEngine->LockDrivesShared();
+                const auto* record = m_searchEngine->GetRecordUnsafe(res.Drive, res.RecordIndex);
+                if (!record) {
+                    m_searchEngine->UnlockDrivesShared();
+                    return CDRF_DODEFAULT;
+                }
+
                 SHFILEINFOW sfiLocal;
-                DWORD attribs = res.IsDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
-                SHGetFileInfoW(res.Name.c_str(), attribs, &sfiLocal, sizeof(sfiLocal), 
+                DWORD attribs = record->IsDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                SHGetFileInfoW(record->Name.c_str(), attribs, &sfiLocal, sizeof(sfiLocal), 
                                SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
 
                 // Get the Small ImageList associated with the ListView
@@ -913,7 +948,7 @@ LRESULT CSearchView::OnCustomDraw(int idCtrl, LPNMHDR pnmh, BOOL& bHandled) {
                 rc.left += 24;
 
                 // Draw segments
-                const std::wstring& name = res.Name;
+                const std::wstring& name = record->Name;
 
                 // Obtain the active search words from StringMatcher
                 const auto& wordsLower = m_searchEngine->GetLastMatcher().GetWordsLower();
@@ -988,6 +1023,7 @@ LRESULT CSearchView::OnCustomDraw(int idCtrl, LPNMHDR pnmh, BOOL& bHandled) {
 
                 // Restore font
                 ::SelectObject(hdc, hOldFont);
+                m_searchEngine->UnlockDrivesShared();
                 return CDRF_SKIPDEFAULT; // Skip standard paint for this subitem
             } else {
                 // Set explicit text and background colors for default column painting to prevent white blanks on hover

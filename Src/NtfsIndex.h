@@ -6,15 +6,9 @@ namespace Ntfs {
 
     // Represents a single file or directory record stored in the memory index.
     // Specifying fields with compact alignment.
-    struct FileRecordName {
+    struct FileRecord {
         std::wstring Name;
         unsigned int ParentFrs = 0xFFFFFFFF;
-    };
-
-    // Represents a single file or directory record stored in the memory index.
-    // Specifying fields with compact alignment.
-    struct FileRecord {
-        std::vector<FileRecordName> Names;
         unsigned long long Size = 0;
         unsigned long long SizeOnDisk = 0;
         unsigned long long DateModified = 0;
@@ -65,11 +59,11 @@ namespace Ntfs {
         void UnlockExclusive() { m_lock.unlock(); }
 
         // Reference direct accessor (must lock index shared before iterating!)
-        const std::vector<FileRecord>& GetRecordsInternal() const { return m_records; }
+        const std::vector<std::unique_ptr<FileRecord>>& GetRecordsInternal() const { return m_records; }
 
     private:
         wchar_t m_driveLetter;
-        std::vector<FileRecord> m_records; // flat contiguous array indexed by FRS number for O(1) accesses
+        std::vector<std::unique_ptr<FileRecord>> m_records; // flat contiguous array indexed by FRS number for O(1) accesses
 
         std::atomic<bool> m_isIndexed;
         std::atomic<unsigned int> m_totalFiles;
