@@ -1,6 +1,6 @@
 # 🚀 FastSearch
 
-**FastSearch** is an instant filename search engine that quickly locates files and folders by name on Windows. Built with modern C++.
+**FastSearch** is an instant filename search engine that quickly locates files and folders by name on Windows. Searches 1million files in 2 Seconds. Built with modern C++.
 ### How is Everything different from other File search engines
 * Small Portable installation file(<1MB).
 * Clean and simple user interface.
