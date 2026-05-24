@@ -7,7 +7,7 @@
 ## ✨ Features
 
 *   **⚡ Sub-Second MFT Indexing**: Directly parses raw NTFS Master File Table (MFT) partitions using sector-aligned raw disk I/O, indexing over 1,000,000 files in under 2 seconds.
-*   **🧠 Ultra-Low Memory Footprint**: Consolidated RAM consumption down to under **50 MB** (comparable to the Everything tool) using a custom 8-byte `CompactString` pointer architecture, Contiguous sparse record storage, and zero-allocation dynamic result lookups.
+*   **🧠 Ultra-Low Memory Footprint**: Consolidated RAM consumption down to under **90 MB** using a custom 8-byte `CompactString` pointer architecture, Contiguous sparse record storage, and zero-allocation dynamic result lookups.
 *   **🔄 Real-Time USN Synchronization**: Tracks all filesystem additions, deletions, renames, and attributes in real-time by reading the Windows Update Sequence Number (USN) Journal.
 *   **🔌 Stateless Hot-Plugging & Safe Ejection**: Implements a stateless on-demand polling mechanism and robust PnP device interface translations (GUID volume resolution). Instantly indexes newly attached USB drives and allows safe ejection on the very first click without locking the drive.
 *   **💻 Native Windows UI**: Built with a sleek, borderless WTL frame using Segoe UI typography, smooth micro-animations, customizable views (Details, Large Icons, Extra Large Icons), instant character highlighting, and seamless system tray minimization.
