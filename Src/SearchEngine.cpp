@@ -25,7 +25,12 @@ namespace Search {
     // Identifies all physical fixed NTFS drives in the system and triggers 
     // an asynchronous MFT background reader thread for each drive.
     void SearchEngine::InitializeDrives(IIndexProgressCallback* callback) {
+        std::lock_guard<std::mutex> lock(m_searchMutex);
+
         DWORD mask = GetLogicalDrives();
+        std::vector<wchar_t> activeDrives;
+
+        // 1. Identify currently active NTFS fixed drives
         for (int i = 0; i < 26; ++i) {
             if (mask & (1 << i)) {
                 wchar_t driveLetter = L'A' + i;
@@ -39,75 +44,110 @@ namespace Search {
                     if (GetVolumeInformationW(drivePath.c_str(), NULL, 0, NULL, NULL, NULL, fsName, 100)) {
                         // MFT parsing is exclusive to NTFS file systems
                         if (wcscmp(fsName, L"NTFS") == 0) {
-                            std::lock_guard<std::mutex> lock(m_searchMutex);
-
-                            DriveContext ctx;
-                            ctx.Index = std::make_unique<Ntfs::NtfsIndex>(driveLetter);
-                            if (m_notifyWindow) {
-                                ctx.Index->RegisterNotifyWindow(m_notifyWindow);
-                            }
-                            ctx.Monitor = std::make_unique<Ntfs::UsnJournalMonitor>(ctx.Index.get());
-
-                            Ntfs::NtfsIndex* pIndex = ctx.Index.get();
-                            Ntfs::UsnJournalMonitor* pMonitor = ctx.Monitor.get();
-
-                            m_drives.push_back(std::move(ctx));
-
-                            // Spawn a background indexing thread for this volume
-                            std::thread([this, driveLetter, pIndex, pMonitor, callback]() {
-                                
-                                // Progress wrapper for Raw MFT Reader callback
-                                class MftCallback : public Ntfs::IMftProgressCallback {
-                                public:
-                                    wchar_t Drive;
-                                    IIndexProgressCallback* UiCallback;
-                                    bool Completed = false;
-                                    bool Success = false;
-                                    std::vector<unsigned char> Buffer;
-                                    unsigned int RecSize = 0;
-
-                                    void OnProgress(unsigned int current, unsigned int total) override {
-                                        UiCallback->OnIndexProgress(Drive, current, total);
-                                    }
-                                    void OnComplete(bool success, const std::vector<unsigned char>& rawBuffer, unsigned int recordSize) override {
-                                        Success = success;
-                                        Buffer = rawBuffer;
-                                        RecSize = recordSize;
-                                        Completed = true;
-                                    }
-                                } mftCb;
-
-                                mftCb.Drive = driveLetter;
-                                mftCb.UiCallback = callback;
-
-                                Ntfs::MftReader reader;
-                                std::wstring volPath = L"\\\\.\\";
-                                volPath += driveLetter;
-                                volPath += L":";
-
-                                reader.ReadMftAsync(volPath, &mftCb);
-
-                                // Block background loader thread until MftReader reads raw partition clusters
-                                while (!mftCb.Completed) {
-                                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                                }
-
-                                if (mftCb.Success) {
-                                    // Parse the loaded raw MFT records and build tree structures
-                                    pIndex->BuildIndex(mftCb.Buffer, mftCb.RecSize);
-                                    
-                                    // Start real-time monitoring of USN filesystem changes!
-                                    pMonitor->Start();
-                                    
-                                    callback->OnIndexComplete(driveLetter, true, pIndex->GetTotalFileCount(), pIndex->GetTotalFolderCount());
-                                } else {
-                                    callback->OnIndexComplete(driveLetter, false, 0, 0);
-                                }
-                            }).detach();
+                            activeDrives.push_back(driveLetter);
                         }
                     }
                 }
             }
+        }
+
+        // 2. Prune disconnected drives from m_drives (stops their monitors and closes handles)
+        auto it = m_drives.begin();
+        while (it != m_drives.end()) {
+            wchar_t letter = it->Index->GetDriveLetter();
+            bool stillActive = false;
+            for (wchar_t ad : activeDrives) {
+                if (ad == letter) {
+                    stillActive = true;
+                    break;
+                }
+            }
+
+            if (!stillActive) {
+                it->Monitor->Stop(); // Cleanly joins monitor threads and releases volume handles
+                it = m_drives.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        // 3. Add and index any newly connected drives
+        for (wchar_t driveLetter : activeDrives) {
+            bool alreadyIndexed = false;
+            for (const auto& drive : m_drives) {
+                if (drive.Index->GetDriveLetter() == driveLetter) {
+                    alreadyIndexed = true;
+                    break;
+                }
+            }
+
+            if (alreadyIndexed) {
+                continue;
+            }
+
+            DriveContext ctx;
+            ctx.Index = std::make_unique<Ntfs::NtfsIndex>(driveLetter);
+            if (m_notifyWindow) {
+                ctx.Index->RegisterNotifyWindow(m_notifyWindow);
+            }
+            ctx.Monitor = std::make_unique<Ntfs::UsnJournalMonitor>(ctx.Index.get());
+
+            Ntfs::NtfsIndex* pIndex = ctx.Index.get();
+            Ntfs::UsnJournalMonitor* pMonitor = ctx.Monitor.get();
+
+            m_drives.push_back(std::move(ctx));
+
+            // Spawn a background indexing thread for this volume
+            std::thread([this, driveLetter, pIndex, pMonitor, callback]() {
+                
+                // Progress wrapper for Raw MFT Reader callback
+                class MftCallback : public Ntfs::IMftProgressCallback {
+                public:
+                    wchar_t Drive;
+                    IIndexProgressCallback* UiCallback;
+                    bool Completed = false;
+                    bool Success = false;
+                    std::vector<unsigned char> Buffer;
+                    unsigned int RecSize = 0;
+
+                    void OnProgress(unsigned int current, unsigned int total) override {
+                        UiCallback->OnIndexProgress(Drive, current, total);
+                    }
+                    void OnComplete(bool success, const std::vector<unsigned char>& rawBuffer, unsigned int recordSize) override {
+                        Success = success;
+                        Buffer = rawBuffer;
+                        RecSize = recordSize;
+                        Completed = true;
+                    }
+                } mftCb;
+
+                mftCb.Drive = driveLetter;
+                mftCb.UiCallback = callback;
+
+                Ntfs::MftReader reader;
+                std::wstring volPath = L"\\\\.\\";
+                volPath += driveLetter;
+                volPath += L":";
+
+                reader.ReadMftAsync(volPath, &mftCb);
+
+                // Block background loader thread until MftReader reads raw partition clusters
+                while (!mftCb.Completed) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+
+                if (mftCb.Success) {
+                    // Parse the loaded raw MFT records and build tree structures
+                    pIndex->BuildIndex(mftCb.Buffer, mftCb.RecSize);
+                    
+                    // Start real-time monitoring of USN filesystem changes!
+                    pMonitor->Start();
+                    
+                    callback->OnIndexComplete(driveLetter, true, pIndex->GetTotalFileCount(), pIndex->GetTotalFolderCount());
+                } else {
+                    callback->OnIndexComplete(driveLetter, false, 0, 0);
+                }
+            }).detach();
         }
     }
 
@@ -200,6 +240,32 @@ namespace Search {
             }
         }
         return nullptr;
+    }
+
+    void SearchEngine::RemoveDrive(wchar_t driveLetter) {
+        std::lock_guard<std::mutex> lock(m_searchMutex);
+        auto it = m_drives.begin();
+        while (it != m_drives.end()) {
+            if (it->Index->GetDriveLetter() == driveLetter) {
+                it->Monitor->Stop(); // Cleanly stops monitoring and closes volume handles!
+                m_drives.erase(it);
+                break;
+            }
+            ++it;
+        }
+    }
+
+    void SearchEngine::RemoveDriveByHandle(HANDLE hVolume) {
+        std::lock_guard<std::mutex> lock(m_searchMutex);
+        auto it = m_drives.begin();
+        while (it != m_drives.end()) {
+            if (it->Monitor->GetVolumeHandle() == hVolume) {
+                it->Monitor->Stop(); // Cleanly stops monitoring and closes volume handles!
+                m_drives.erase(it);
+                break;
+            }
+            ++it;
+        }
     }
 
     size_t SearchEngine::GetTotalIndexedFiles() const {

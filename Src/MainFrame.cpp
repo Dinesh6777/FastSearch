@@ -2,6 +2,10 @@
 #include "MainFrame.h"
 #include "SettingsDialog.h"
 
+#ifndef GUID_DEVINTERFACE_VOLUME
+extern "C" const GUID GUID_DEVINTERFACE_VOLUME;
+#endif
+
 CMainFrame::CMainFrame()
     : m_activeTabIndex(-1), m_columnMask(COL_DEFAULT) {
 }
@@ -67,6 +71,19 @@ LRESULT CMainFrame::OnCreate(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHan
     BOOL dummy;
     OnSize(WM_SIZE, SIZE_RESTORED, MAKELPARAM(rc.right - rc.left, rc.bottom - rc.top), dummy);
 
+    // Register for volume device notifications to receive DBT_DEVICEQUERYREMOVE events!
+    DEV_BROADCAST_DEVICEINTERFACE notificationFilter;
+    ZeroMemory(&notificationFilter, sizeof(notificationFilter));
+    notificationFilter.dbcc_size = sizeof(notificationFilter);
+    notificationFilter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+    notificationFilter.dbcc_classguid = GUID_DEVINTERFACE_VOLUME;
+
+    m_hDevNotify = RegisterDeviceNotificationW(
+        m_hWnd,
+        &notificationFilter,
+        DEVICE_NOTIFY_WINDOW_HANDLE
+    );
+
     return 0;
 }
 
@@ -77,6 +94,10 @@ LRESULT CMainFrame::OnClose(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHand
 }
 
 LRESULT CMainFrame::OnDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
+    if (m_hDevNotify) {
+        UnregisterDeviceNotification(m_hDevNotify);
+        m_hDevNotify = nullptr;
+    }
     RemoveTrayIcon();
     PostQuitMessage(0);
     return 0;
@@ -145,13 +166,102 @@ LRESULT CMainFrame::OnTrayIcon(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bH
     return 0;
 }
 
+static wchar_t ResolveDriveLetter(const wchar_t* dbcc_name) {
+    if (!dbcc_name) return L'\0';
+
+    // 1. Try direct GUID lookup
+    std::wstring volName = dbcc_name;
+    if (volName.back() != L'\\') {
+        volName += L'\\';
+    }
+    wchar_t pathNames[MAX_PATH] = { 0 };
+    DWORD charsReturned = 0;
+    if (GetVolumePathNamesForVolumeNameW(volName.c_str(), pathNames, MAX_PATH, &charsReturned)) {
+        if (pathNames[0] != L'\0' && pathNames[1] == L':') {
+            return towupper(pathNames[0]);
+        }
+    }
+
+    // 2. Fallback: Query all logical drives and match their volume GUIDs
+    DWORD driveMask = GetLogicalDrives();
+    for (int i = 0; i < 26; ++i) {
+        if (driveMask & (1 << i)) {
+            wchar_t driveLetter = L'A' + i;
+            wchar_t drivePath[] = { driveLetter, L':', L'\\', L'\0' };
+            wchar_t guidName[MAX_PATH] = { 0 };
+            if (GetVolumeNameForVolumeMountPointW(drivePath, guidName, MAX_PATH)) {
+                // Remove trailing backslash for comparison
+                std::wstring s1 = guidName;
+                std::wstring s2 = dbcc_name;
+                if (!s1.empty() && s1.back() == L'\\') s1.pop_back();
+                if (!s2.empty() && s2.back() == L'\\') s2.pop_back();
+                
+                // Compare case-insensitively
+                if (_wcsicmp(s1.c_str(), s2.c_str()) == 0) {
+                    return driveLetter;
+                }
+            }
+        }
+    }
+
+    return L'\0';
+}
+
 // Responds to Windows plug-and-play notifications (USB NTFS external drives)
 LRESULT CMainFrame::OnDeviceChange(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled) {
     if (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE) {
-        // Redetect drives on hot-plug events
+        // Redetect drives on hot-plug events (PnP arrival or removal)
         m_searchEngine.InitializeDrives(this);
+        UpdateDriveComboBoxes();
+
+        // Refresh active views so that the drive's results update immediately
+        if (m_activeTabIndex != -1 && m_activeTabIndex < static_cast<int>(m_tabs.size())) {
+            m_tabs[m_activeTabIndex].View->TriggerSearch();
+        }
     }
-    return 0;
+    else if (wParam == DBT_DEVICEQUERYREMOVE) {
+        DEV_BROADCAST_HDR* header = reinterpret_cast<DEV_BROADCAST_HDR*>(lParam);
+        if (header) {
+            wchar_t driveLetter = L'\0';
+            if (header->dbch_devicetype == DBT_DEVTYP_VOLUME) {
+                DEV_BROADCAST_VOLUME* vol = reinterpret_cast<DEV_BROADCAST_VOLUME*>(header);
+                for (int i = 0; i < 26; ++i) {
+                    if (vol->dbcv_unitmask & (1 << i)) {
+                        driveLetter = L'A' + i;
+                        break;
+                    }
+                }
+            }
+            else if (header->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE) {
+                DEV_BROADCAST_DEVICEINTERFACE* devInt = reinterpret_cast<DEV_BROADCAST_DEVICEINTERFACE*>(header);
+                driveLetter = ResolveDriveLetter(devInt->dbcc_name);
+            }
+
+            if (driveLetter != L'\0') {
+                m_searchEngine.RemoveDrive(driveLetter);
+
+                // Refresh active views so that the closed drive's results disappear immediately
+                if (m_activeTabIndex != -1 && m_activeTabIndex < static_cast<int>(m_tabs.size())) {
+                    m_tabs[m_activeTabIndex].View->TriggerSearch();
+                }
+
+                // Update drive selection combo boxes on all tab views
+                UpdateDriveComboBoxes();
+            }
+        }
+        return TRUE; // Grant permission to remove the device
+    }
+    else if (wParam == DBT_DEVICEQUERYREMOVEFAILED) {
+        // Ejection failed or was aborted by user; re-initialize drives to restore index
+        m_searchEngine.InitializeDrives(this);
+        UpdateDriveComboBoxes();
+
+        if (m_activeTabIndex != -1 && m_activeTabIndex < static_cast<int>(m_tabs.size())) {
+            m_tabs[m_activeTabIndex].View->TriggerSearch();
+        }
+        return TRUE;
+    }
+    return TRUE;
 }
 
 // Handles switching tabs
@@ -329,24 +439,40 @@ void CMainFrame::OnIndexComplete(wchar_t drive, bool success, unsigned int fileC
         }
         
         // Populate drive selector combo boxes on all tab views
-        std::vector<wchar_t> drives = m_searchEngine.GetIndexedDrives();
-        for (auto& tab : m_tabs) {
-            HWND hCombo = tab.View->GetDlgItem(IDC_VOLUME_COMBO);
-            if (hCombo) {
-                // Clear combo
-                SendMessage(hCombo, CB_RESETCONTENT, 0, 0);
-                SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"All Drives");
-                for (wchar_t d : drives) {
-                    std::wstring driveStr = L"";
-                    driveStr += d;
-                    driveStr += L":";
-                    SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)driveStr.c_str());
-                }
-                SendMessage(hCombo, CB_SETCURSEL, 0, 0);
-            }
-        }
+        UpdateDriveComboBoxes();
     } else {
         m_statusBar.SetText(0, L"Failed to read raw MFT block. Ensure running as Administrator.");
+    }
+}
+
+void CMainFrame::UpdateDriveComboBoxes() {
+    std::vector<wchar_t> drives = m_searchEngine.GetIndexedDrives();
+    for (auto& tab : m_tabs) {
+        HWND hCombo = tab.View->GetDlgItem(IDC_VOLUME_COMBO);
+        if (hCombo) {
+            // Get current selection to try to restore it
+            int curSel = static_cast<int>(::SendMessageW(hCombo, CB_GETCURSEL, 0, 0));
+            wchar_t curText[100] = { 0 };
+            if (curSel != CB_ERR) {
+                ::SendMessageW(hCombo, CB_GETLBTEXT, curSel, (LPARAM)curText);
+            }
+
+            ::SendMessageW(hCombo, CB_RESETCONTENT, 0, 0);
+            ::SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)L"All Drives");
+            int newSel = 0;
+            int idx = 1;
+            for (wchar_t d : drives) {
+                std::wstring driveStr = L"";
+                driveStr += d;
+                driveStr += L":";
+                ::SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)driveStr.c_str());
+                if (wcscmp(curText, driveStr.c_str()) == 0) {
+                    newSel = idx;
+                }
+                idx++;
+            }
+            ::SendMessageW(hCombo, CB_SETCURSEL, newSel, 0);
+        }
     }
 }
 

@@ -65,6 +65,10 @@ namespace Search {
         // Unsafe raw record retrieval (MUST call LockDrivesShared first!)
         const Ntfs::FileRecord* GetRecordUnsafe(wchar_t driveLetter, unsigned int recordIndex) const;
 
+        // Safely stops and removes a drive index and monitor (used during ejection/removal)
+        void RemoveDrive(wchar_t driveLetter);
+        void RemoveDriveByHandle(HANDLE hVolume);
+
         // Retrieves the active query matcher for custom drawing highlights
         const StringMatcher& GetLastMatcher() const { return m_lastMatcher; }
 

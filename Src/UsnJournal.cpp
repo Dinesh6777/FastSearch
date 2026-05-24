@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "UsnJournal.h"
+#include <dbt.h>
 
 namespace Ntfs {
 
@@ -35,7 +36,7 @@ namespace Ntfs {
 
         // 1. Open volume handle with write access to query/create journal if needed.
         // Requires Administrator elevation.
-        pThis->m_volumeHandle = CreateFileW(
+        HANDLE hInitVol = CreateFileW(
             volPath.c_str(),
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -46,8 +47,8 @@ namespace Ntfs {
         );
 
         // Fallback to read-only access if write access is denied (e.g. system locks)
-        if (pThis->m_volumeHandle == INVALID_HANDLE_VALUE) {
-            pThis->m_volumeHandle = CreateFileW(
+        if (hInitVol == INVALID_HANDLE_VALUE) {
+            hInitVol = CreateFileW(
                 volPath.c_str(),
                 GENERIC_READ,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -58,7 +59,7 @@ namespace Ntfs {
             );
         }
 
-        if (pThis->m_volumeHandle == INVALID_HANDLE_VALUE) {
+        if (hInitVol == INVALID_HANDLE_VALUE) {
             return; // Exit thread if raw volume open fails
         }
 
@@ -66,7 +67,7 @@ namespace Ntfs {
         USN_JOURNAL_DATA_V0 ujd = { 0 };
         DWORD cbReturned = 0;
         BOOL ok = DeviceIoControl(
-            pThis->m_volumeHandle,
+            hInitVol,
             FSCTL_QUERY_USN_JOURNAL,
             NULL, 0,
             &ujd, sizeof(ujd),
@@ -81,7 +82,7 @@ namespace Ntfs {
             cujd.AllocationDelta = 0;  // System default allocation increment
             
             DeviceIoControl(
-                pThis->m_volumeHandle,
+                hInitVol,
                 FSCTL_CREATE_USN_JOURNAL,
                 &cujd, sizeof(cujd),
                 NULL, 0,
@@ -91,7 +92,7 @@ namespace Ntfs {
 
             // Re-query journal status after creation attempt
             ok = DeviceIoControl(
-                pThis->m_volumeHandle,
+                hInitVol,
                 FSCTL_QUERY_USN_JOURNAL,
                 NULL, 0,
                 &ujd, sizeof(ujd),
@@ -101,8 +102,7 @@ namespace Ntfs {
         }
 
         if (!ok) {
-            CloseHandle(pThis->m_volumeHandle);
-            pThis->m_volumeHandle = INVALID_HANDLE_VALUE;
+            CloseHandle(hInitVol);
             return; // Exit if USN Journal query fails
         }
 
@@ -110,6 +110,9 @@ namespace Ntfs {
         // We only want to monitor new filesystem changes occurring *after* index build.
         pThis->m_nextUsn = ujd.NextUsn;
         pThis->m_journalId = ujd.UsnJournalID;
+
+        // Close initial handle immediately so drive is not locked!
+        CloseHandle(hInitVol);
 
         // 3. Monitor Loop
         READ_USN_JOURNAL_DATA_V0 readData = { 0 };
@@ -124,15 +127,35 @@ namespace Ntfs {
         std::vector<unsigned char> usnBuffer(8192);
 
         while (pThis->m_running) {
+            // Open volume handle on-demand for this poll
+            HANDLE hVol = CreateFileW(
+                volPath.c_str(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                NULL,
+                OPEN_EXISTING,
+                0,
+                NULL
+            );
+
+            if (hVol == INVALID_HANDLE_VALUE) {
+                // If the drive is currently locked/ejecting or disconnected, sleep and retry
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                continue;
+            }
+
             DWORD cb = 0;
             BOOL success = DeviceIoControl(
-                pThis->m_volumeHandle,
+                hVol,
                 FSCTL_READ_USN_JOURNAL,
                 &readData, sizeof(readData),
                 usnBuffer.data(), static_cast<DWORD>(usnBuffer.size()),
                 &cb,
                 NULL
             );
+
+            // Close handle immediately after read call!
+            CloseHandle(hVol);
 
             if (!success || cb < sizeof(USN)) {
                 // Sleep to avoid thrashing if IOControl encounters transient error or lock

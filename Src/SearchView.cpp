@@ -298,6 +298,7 @@ void CSearchView::RunSearchInternal() {
 
     // Set virtual list items count. Controls virtual render loops.
     m_listView.SetItemCount(static_cast<int>(m_results.size()));
+    m_listView.Invalidate();
 
     // Notify MainFrame parent that search results count changed
     if (::IsWindow(GetParent())) {

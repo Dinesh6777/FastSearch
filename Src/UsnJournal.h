@@ -20,6 +20,12 @@ namespace Ntfs {
         // Stops the USN monitoring thread
         void Stop();
 
+        // Register notify window for handle-based notifications
+        void RegisterNotifyWindow(HWND hwnd) { m_notifyWindow = hwnd; }
+
+        // Returns active volume handle
+        HANDLE GetVolumeHandle() const { return m_volumeHandle; }
+
     private:
         static void MonitorThreadProc(UsnJournalMonitor* pThis);
 
@@ -29,6 +35,7 @@ namespace Ntfs {
         HANDLE m_volumeHandle;
         USN m_nextUsn;
         DWORDLONG m_journalId;
+        HWND m_notifyWindow = nullptr;
     };
 
 } // namespace Ntfs

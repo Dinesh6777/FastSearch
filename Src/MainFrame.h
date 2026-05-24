@@ -87,12 +87,14 @@ private:
     void CreateNewTab(const std::wstring& name);
     void CloseTab(int tabIndex);
     void UpdateStatusText();
+    void UpdateDriveComboBoxes();
     
     // System Tray Management
     void AddTrayIcon();
     void RemoveTrayIcon();
 
     Search::SearchEngine m_searchEngine;
+    HDEVNOTIFY m_hDevNotify = nullptr;
     
     // UI controls
     CTabCtrl m_tabCtrl;
