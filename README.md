@@ -11,6 +11,8 @@
 * Minimal resource usage.
 * No database on disk.
 * Real-time updating.
+#### [Download FastSearch from Releases](https://github.com/Dinesh6777/FastSearch/releases)
+<img width="923" height="545" alt="image" src="https://github.com/user-attachments/assets/f436600a-5a6f-4263-8eac-5000d71c962e" />
 
 ---
 
