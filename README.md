@@ -2,6 +2,16 @@
 
 **FastSearch** is an instant filename search engine that quickly locates files and folders by name on Windows. Built with modern C++, WTL (Windows Template Library), and ATL, it parses raw NTFS Master File Tables (MFT) directly to index millions of files in seconds, delivering high-performance, real-time search results with an incredibly compact memory footprint.
 
+### How is Everything different from other File search engines
+* Small Portable installation file(<1MB).
+* Clean and simple user interface.
+* Quick file indexing.
+* Quick searching.
+* Quick startup.
+* Minimal resource usage.
+* No database on disk.
+* Real-time updating.
+
 ---
 
 ## ✨ Features
