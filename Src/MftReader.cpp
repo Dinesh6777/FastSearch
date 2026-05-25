@@ -99,7 +99,7 @@ namespace Ntfs {
         );
 
         if (pThis->m_volumeHandle == INVALID_HANDLE_VALUE) {
-            callback->OnComplete(false, std::vector<unsigned char>(), 0);
+            callback->OnComplete(false, 0);
             return;
         }
 
@@ -108,7 +108,7 @@ namespace Ntfs {
         DWORD bytesRead = 0;
         std::vector<unsigned char> sectorBuffer(512);
         if (!ReadFile(pThis->m_volumeHandle, sectorBuffer.data(), 512, &bytesRead, NULL) || bytesRead != 512) {
-            callback->OnComplete(false, std::vector<unsigned char>(), 0);
+            callback->OnComplete(false, 0);
             return;
         }
 
@@ -116,7 +116,7 @@ namespace Ntfs {
         
         // Verify this is indeed an NTFS partition
         if (memcmp(bootSector->Oem, "NTFS    ", 8) != 0) {
-            callback->OnComplete(false, std::vector<unsigned char>(), 0);
+            callback->OnComplete(false, 0);
             return;
         }
 
@@ -137,7 +137,7 @@ namespace Ntfs {
         ol.OffsetHigh = mftOffset.HighPart;
 
         if (!ReadFile(pThis->m_volumeHandle, frs0Buffer.data(), recordSize, &bytesRead, &ol) || bytesRead != recordSize) {
-            callback->OnComplete(false, std::vector<unsigned char>(), 0);
+            callback->OnComplete(false, 0);
             return;
         }
 
@@ -145,13 +145,13 @@ namespace Ntfs {
         
         // Validate magic signature "FILE"
         if (frs0->MultiSectorHeader.Magic != 0x454C4946) { // 'FILE' in little-endian
-            callback->OnComplete(false, std::vector<unsigned char>(), 0);
+            callback->OnComplete(false, 0);
             return;
         }
 
         // Apply NTFS Update Sequence Array (USA) unfixup to ensure record is not corrupt
         if (!frs0->MultiSectorHeader.unfixup(recordSize)) {
-            callback->OnComplete(false, std::vector<unsigned char>(), 0);
+            callback->OnComplete(false, 0);
             return;
         }
 
@@ -174,7 +174,7 @@ namespace Ntfs {
         }
 
         if (dataAttrs.empty()) {
-            callback->OnComplete(false, std::vector<unsigned char>(), 0);
+            callback->OnComplete(false, 0);
             return;
         }
 
@@ -197,6 +197,9 @@ namespace Ntfs {
 
         unsigned int totalExpectedRecords = static_cast<unsigned int>(mftLogicalSize / recordSize);
 
+        // Pre-allocate index array size dynamically prior to chunked indexing
+        callback->OnStart(totalExpectedRecords);
+
         // 4. Extract data runs of all MFT fragments
         std::vector<MftRun> mftRuns;
         for (auto dataAttr : dataAttrs) {
@@ -208,21 +211,20 @@ namespace Ntfs {
         }
 
         if (mftRuns.empty()) {
-            callback->OnComplete(false, std::vector<unsigned char>(), 0);
+            callback->OnComplete(false, 0);
             return;
         }
 
-        // 5. Read all MFT clusters into one continuous buffer
-        // Since we are reading raw clusters, we must round up buffer size to sector-aligned sizing.
-        size_t alignedMftSize = static_cast<size_t>((mftLogicalSize + sectorSize - 1) & ~((long long)sectorSize - 1));
-        std::vector<unsigned char> rawMftBuffer(alignedMftSize);
+        // 5. Read MFT clusters in chunks and process them immediately (zero persistent RAM copy!)
+        const DWORD maxChunkSize = 4 * 1024 * 1024; // 4MB chunks
+        std::vector<unsigned char> chunkBuffer(maxChunkSize);
 
-        size_t bufferWriteOffset = 0;
         unsigned int recordsProcessed = 0;
+        DWORD lastUpdateTick = 0;
 
         for (const auto& run : mftRuns) {
             if (pThis->m_cancelled) {
-                callback->OnComplete(false, std::vector<unsigned char>(), 0);
+                callback->OnComplete(false, 0);
                 return;
             }
 
@@ -233,12 +235,9 @@ namespace Ntfs {
             long long remainingBytes = runByteSize;
             long long currentReadOffset = runStartByteOffset;
 
-            // Maximum read chunk (usually 1MB to balance performance and refresh rate)
-            const DWORD maxChunkSize = 1024 * 1024; 
-
             while (remainingBytes > 0) {
                 if (pThis->m_cancelled) {
-                    callback->OnComplete(false, std::vector<unsigned char>(), 0);
+                    callback->OnComplete(false, 0);
                     return;
                 }
 
@@ -253,26 +252,25 @@ namespace Ntfs {
                 runOl.Offset = liOffset.LowPart;
                 runOl.OffsetHigh = liOffset.HighPart;
 
-                // Dynamically resize raw buffer if writing exceeds allocated sizing
-                if (bufferWriteOffset + chunkToRead > rawMftBuffer.size()) {
-                    rawMftBuffer.resize(bufferWriteOffset + chunkToRead);
-                }
-
-                // Sector-aligned buffer space
-                unsigned char* pDest = rawMftBuffer.data() + bufferWriteOffset;
-
-                if (!ReadFile(pThis->m_volumeHandle, pDest, chunkToRead, &bytesRead, &runOl) || bytesRead == 0) {
-                    // Try to read smaller sector increments if read fails
-                    callback->OnComplete(false, std::vector<unsigned char>(), 0);
+                if (!ReadFile(pThis->m_volumeHandle, chunkBuffer.data(), chunkToRead, &bytesRead, &runOl) || bytesRead == 0) {
+                    callback->OnComplete(false, 0);
                     return;
                 }
 
-                bufferWriteOffset += bytesRead;
+                // Process this chunk immediately!
+                unsigned int startFrs = recordsProcessed;
+                callback->OnChunk(chunkBuffer.data(), bytesRead, startFrs, recordSize);
+
                 remainingBytes -= bytesRead;
                 currentReadOffset += bytesRead;
+                recordsProcessed += static_cast<unsigned int>(bytesRead / recordSize);
 
-                recordsProcessed = static_cast<unsigned int>(bufferWriteOffset / recordSize);
-                callback->OnProgress(recordsProcessed, totalExpectedRecords);
+                // Throttle progress callback to avoid blocking UI updates on small/fragmented chunk runs
+                DWORD currentTick = GetTickCount();
+                if (currentTick - lastUpdateTick >= 100 || recordsProcessed >= totalExpectedRecords || remainingBytes <= 0) {
+                    callback->OnProgress(recordsProcessed, totalExpectedRecords);
+                    lastUpdateTick = currentTick;
+                }
             }
         }
 
@@ -280,7 +278,7 @@ namespace Ntfs {
         CloseHandle(pThis->m_volumeHandle);
         pThis->m_volumeHandle = INVALID_HANDLE_VALUE;
 
-        callback->OnComplete(true, rawMftBuffer, recordSize);
+        callback->OnComplete(true, recordSize);
     }
 
 } // namespace Ntfs

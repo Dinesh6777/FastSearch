@@ -121,6 +121,11 @@ namespace Ntfs {
         // Parses the raw MFT buffer in a single thread or multithreaded pass
         bool BuildIndex(const std::vector<unsigned char>& rawBuffer, unsigned int recordSize);
 
+        // Chunk-based parsing methods
+        void InitializeIndexSize(unsigned int totalRecords);
+        void ProcessMftChunk(unsigned char* chunkBuffer, size_t chunkSize, unsigned int startFrs, unsigned int recordSize);
+        void FinalizeIndex();
+
         // Path resolution: traces parent chain upwards in O(depth) (extremely fast, usually depth < 10)
         std::wstring ResolveFullPath(unsigned int recordIndex) const;
         std::wstring ResolveFullPath(unsigned int parentFrs, const std::wstring& name) const;

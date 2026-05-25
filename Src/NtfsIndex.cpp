@@ -23,16 +23,50 @@ namespace Ntfs {
     // 2. Attributes are enumerated in-order inside the record space.
     // 3. Metadata (timestamps, sizes, parent folder pointers) is cached in the flat O(1) vector.
     bool NtfsIndex::BuildIndex(const std::vector<unsigned char>& rawBuffer, unsigned int recordSize) {
+        InitializeIndexSize(static_cast<unsigned int>(rawBuffer.size() / recordSize));
+        ProcessMftChunk(const_cast<unsigned char*>(rawBuffer.data()), rawBuffer.size(), 0, recordSize);
+        FinalizeIndex();
+        return true;
+    }
+
+    void NtfsIndex::InitializeIndexSize(unsigned int totalRecords) {
         LockExclusive();
         m_records.clear();
+        m_records.resize(totalRecords);
         m_totalFiles = 0;
         m_totalFolders = 0;
+        m_isIndexed = false;
 
-        unsigned int numRecords = static_cast<unsigned int>(rawBuffer.size() / recordSize);
-        m_records.resize(numRecords);
+        // Hardcode standard root directory (FRS 5) representation
+        if (5 < m_records.size()) {
+            m_records[5] = std::make_unique<FileRecord>();
+            m_records[5]->Name = L"";
+            m_records[5]->ParentFrs = 5;
+            m_records[5]->IsDirectory = true;
+        }
+
+        UnlockExclusive();
+    }
+
+    void NtfsIndex::ProcessMftChunk(unsigned char* chunkBuffer, size_t chunkSize, unsigned int startFrs, unsigned int recordSize) {
+        LockExclusive();
+
+        unsigned int numRecords = static_cast<unsigned int>(chunkSize / recordSize);
+        
+        // Ensure capacity
+        if (startFrs + numRecords > m_records.size()) {
+            m_records.resize(startFrs + numRecords + 1024);
+        }
+
+        // Pre-allocate std::wstring objects outside the loop to reuse their underlying buffers
+        std::wstring primaryName;
+        std::wstring dosName;
+        primaryName.reserve(260);
+        dosName.reserve(260);
 
         for (unsigned int i = 0; i < numRecords; ++i) {
-            unsigned char* pRecordBytes = const_cast<unsigned char*>(&rawBuffer[i * recordSize]);
+            unsigned int frsIndex = startFrs + i;
+            unsigned char* pRecordBytes = chunkBuffer + (i * recordSize);
             FILE_RECORD_SEGMENT_HEADER* frsh = reinterpret_cast<FILE_RECORD_SEGMENT_HEADER*>(pRecordBytes);
 
             // Skip unallocated or deleted records (magic must be "FILE", flags must show in-use)
@@ -45,20 +79,24 @@ namespace Ntfs {
                 continue; // Skip record if fixup check fails (corrupt or partial record)
             }
 
-            m_records[i] = std::make_unique<FileRecord>();
-            FileRecord& item = *m_records[i];
-            item.IsDirectory = (frsh->Flags & FRH_DIRECTORY) != 0;
+            bool isDirectory = (frsh->Flags & FRH_DIRECTORY) != 0;
 
             // Iterate attributes inside this FRS
             ATTRIBUTE_RECORD_HEADER* attr = frsh->begin();
             unsigned char* recordEnd = pRecordBytes + recordSize;
 
-            struct TempName {
-                std::wstring Name;
-                unsigned int ParentFrs;
-                unsigned char NamespaceFlags;
-            };
-            std::vector<TempName> fileNames;
+            primaryName.clear();
+            dosName.clear();
+            unsigned int primaryParent = 0xFFFFFFFF;
+            unsigned int dosParent = 0xFFFFFFFF;
+
+            // Temporary stack metadata variables
+            unsigned long long dateCreated = 0;
+            unsigned long long dateModified = 0;
+            unsigned long long dateAccessed = 0;
+            unsigned int attributes = 0;
+            unsigned long long size = 0;
+            unsigned long long sizeOnDisk = 0;
 
             // Timestamps, sizes, and attribute structures
             while (reinterpret_cast<unsigned char*>(attr) + sizeof(ATTRIBUTE_RECORD_HEADER) <= recordEnd && 
@@ -74,10 +112,10 @@ namespace Ntfs {
                     if (!attr->IsNonResident) {
                         const STANDARD_INFORMATION* stdInfo = 
                             reinterpret_cast<const STANDARD_INFORMATION*>(attr->GetValue());
-                        item.DateCreated = stdInfo->CreationTime;
-                        item.DateModified = stdInfo->LastModificationTime;
-                        item.DateAccessed = stdInfo->LastAccessTime;
-                        item.Attributes = stdInfo->FileAttributes;
+                        dateCreated = stdInfo->CreationTime;
+                        dateModified = stdInfo->LastModificationTime;
+                        dateAccessed = stdInfo->LastAccessTime;
+                        attributes = stdInfo->FileAttributes;
                     }
                 }
                 else if (attr->Type == AttributeFileName) {
@@ -89,90 +127,77 @@ namespace Ntfs {
                         // Extract parent folder FRS index (low 48 bits of parent reference)
                         unsigned int pFrs = static_cast<unsigned int>(fnInfo->ParentDirectory & 0x0000FFFFFFFFFFFFLL);
 
-                        // File names inside MFT are stored in UTF-16. Extract filename string.
-                        std::wstring name(fnInfo->FileName, fnInfo->FileNameLength);
-
-                        // Log first 100 raw parsed filenames
-                        static int rawLogged = 0;
-                        if (rawLogged < 100) {
-                            FILE* fRawLog = nullptr;
-                            if (_wfopen_s(&fRawLog, L"C:\\Users\\Sri\\Documents\\FastSearch\\mft_names_raw.txt", rawLogged == 0 ? L"w" : L"a") == 0 && fRawLog) {
-                                fwprintf(fRawLog, L"Raw Parsed: FRS=%u, Len=%u, Flags=%u, Name='%s'\n", 
-                                         i, fnInfo->FileNameLength, fnInfo->Flags, name.c_str());
-                                fclose(fRawLog);
-                                rawLogged++;
+                        // File names inside MFT are stored in UTF-16.
+                        // Namespace flags: 0=POSIX, 1=Win32, 2=DOS, 3=Win32&DOS.
+                        // We prefer Win32/POSIX names and fallback to DOS.
+                        if (fnInfo->Flags == 2) {
+                            if (dosName.empty()) {
+                                dosName.assign(fnInfo->FileName, fnInfo->FileNameLength);
+                                dosParent = pFrs;
+                            }
+                        } else {
+                            if (primaryName.empty()) {
+                                primaryName.assign(fnInfo->FileName, fnInfo->FileNameLength);
+                                primaryParent = pFrs;
                             }
                         }
-
-                        fileNames.push_back({ name, pFrs, fnInfo->Flags });
                     }
                 }
                 else if (attr->Type == AttributeData) {
                     // data stream attribute (file size)
                     if (attr->IsNonResident) {
-                        item.Size = attr->NonResident.DataSize;
-                        item.SizeOnDisk = attr->NonResident.AllocatedSize;
+                        size = attr->NonResident.DataSize;
+                        sizeOnDisk = attr->NonResident.AllocatedSize;
                     } else {
-                        item.Size = attr->Resident.ValueLength;
-                        item.SizeOnDisk = attr->Length; // Size of attribute record itself
+                        size = attr->Resident.ValueLength;
+                        sizeOnDisk = attr->Length; // Size of attribute record itself
                     }
                 }
 
                 attr = attr->next();
             }
 
-            // Process collected names (only primary Win32/POSIX, fallback to DOS)
-            std::wstring primaryName;
-            unsigned int primaryParent = 0xFFFFFFFF;
-            std::wstring dosName;
-            unsigned int dosParent = 0xFFFFFFFF;
-
-            for (const auto& fn : fileNames) {
-                if (fn.NamespaceFlags == 2) {
-                    if (dosName.empty()) {
-                        dosName = fn.Name;
-                        dosParent = fn.ParentFrs;
-                    }
-                } else {
-                    if (primaryName.empty()) {
-                        primaryName = fn.Name;
-                        primaryParent = fn.ParentFrs;
-                    }
-                }
-            }
+            const std::wstring* pFinalName = nullptr;
+            unsigned int finalParent = 0xFFFFFFFF;
 
             if (!primaryName.empty()) {
-                item.Name = primaryName;
-                item.ParentFrs = primaryParent;
+                pFinalName = &primaryName;
+                finalParent = primaryParent;
             } else if (!dosName.empty()) {
-                item.Name = dosName;
-                item.ParentFrs = dosParent;
+                pFinalName = &dosName;
+                finalParent = dosParent;
             }
 
-            // Update stats
-            if (!item.Name.empty() && item.ParentFrs != 0xFFFFFFFF) {
+            // Lazy Allocation: Only allocate and populate if the record has a valid name!
+            if (pFinalName && !pFinalName->empty() && finalParent != 0xFFFFFFFF) {
+                m_records[frsIndex] = std::make_unique<FileRecord>();
+                FileRecord& item = *m_records[frsIndex];
+                item.IsDirectory = isDirectory;
+                item.Name = *pFinalName;
+                item.ParentFrs = finalParent;
+                item.DateCreated = dateCreated;
+                item.DateModified = dateModified;
+                item.DateAccessed = dateAccessed;
+                item.Attributes = attributes;
+                item.Size = size;
+                item.SizeOnDisk = sizeOnDisk;
+
                 if (item.IsDirectory) {
                     m_totalFolders++;
                 } else {
                     m_totalFiles++;
                 }
-            } else {
-                // If the record has no valid name, we don't need to keep it allocated on the heap!
-                m_records[i].reset();
             }
         }
 
-        // Hardcode standard root directory (FRS 5) representation
-        if (5 < m_records.size()) {
-            if (!m_records[5]) {
-                m_records[5] = std::make_unique<FileRecord>();
-            }
-            m_records[5]->Name = L"";
-            m_records[5]->ParentFrs = 5;
-            m_records[5]->IsDirectory = true;
-        }
+        UnlockExclusive();
+    }
 
-        // Temporarily log the first 50 non-empty indexed files to check for corruption
+    void NtfsIndex::FinalizeIndex() {
+        LockExclusive();
+        m_isIndexed = true;
+
+        // Log first 50 non-empty indexed files to check for corruption
         FILE* fBuildLog = nullptr;
         if (_wfopen_s(&fBuildLog, L"C:\\Users\\Sri\\Documents\\FastSearch\\build_index_debug.txt", L"w") == 0 && fBuildLog) {
             fwprintf(fBuildLog, L"First 50 Indexed Names:\n");
@@ -187,10 +212,9 @@ namespace Ntfs {
             fclose(fBuildLog);
         }
 
-        m_isIndexed = true;
         UnlockExclusive();
-        return true;
     }
+
 
     // Safely resolves the full canonical path for a given MFT file record
     // by walking the parent chain upward until the partition root (FRS 5 or 0) is hit.

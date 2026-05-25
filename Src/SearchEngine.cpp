@@ -105,24 +105,33 @@ namespace Search {
                 public:
                     wchar_t Drive;
                     IIndexProgressCallback* UiCallback;
+                    Ntfs::NtfsIndex* Index;
                     bool Completed = false;
                     bool Success = false;
-                    std::vector<unsigned char> Buffer;
                     unsigned int RecSize = 0;
 
+                    void OnStart(unsigned int totalExpected) override {
+                        Index->InitializeIndexSize(totalExpected);
+                    }
                     void OnProgress(unsigned int current, unsigned int total) override {
                         UiCallback->OnIndexProgress(Drive, current, total);
                     }
-                    void OnComplete(bool success, const std::vector<unsigned char>& rawBuffer, unsigned int recordSize) override {
+                    void OnChunk(unsigned char* chunkBuffer, size_t chunkSize, unsigned int startFrs, unsigned int recordSize) override {
+                        Index->ProcessMftChunk(chunkBuffer, chunkSize, startFrs, recordSize);
+                    }
+                    void OnComplete(bool success, unsigned int recordSize) override {
                         Success = success;
-                        Buffer = rawBuffer;
                         RecSize = recordSize;
+                        if (success) {
+                            Index->FinalizeIndex();
+                        }
                         Completed = true;
                     }
                 } mftCb;
 
                 mftCb.Drive = driveLetter;
                 mftCb.UiCallback = callback;
+                mftCb.Index = pIndex;
 
                 Ntfs::MftReader reader;
                 std::wstring volPath = L"\\\\.\\";
@@ -137,9 +146,6 @@ namespace Search {
                 }
 
                 if (mftCb.Success) {
-                    // Parse the loaded raw MFT records and build tree structures
-                    pIndex->BuildIndex(mftCb.Buffer, mftCb.RecSize);
-                    
                     // Start real-time monitoring of USN filesystem changes!
                     pMonitor->Start();
                     

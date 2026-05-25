@@ -140,7 +140,7 @@ namespace Ntfs {
 
             if (hVol == INVALID_HANDLE_VALUE) {
                 // If the drive is currently locked/ejecting or disconnected, sleep and retry
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 continue;
             }
 
@@ -159,7 +159,7 @@ namespace Ntfs {
 
             if (!success || cb < sizeof(USN)) {
                 // Sleep to avoid thrashing if IOControl encounters transient error or lock
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 continue;
             }
 
@@ -240,7 +240,7 @@ namespace Ntfs {
                 pThis->m_index->NotifyIndexChanged();
             } else {
                 // Idle debounce: if no updates were processed, sleep to keep CPU idle at 0%
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             }
         }
     }

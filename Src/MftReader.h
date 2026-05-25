@@ -13,8 +13,10 @@ namespace Ntfs {
     // Callback interface for reporting MFT read progress
     class IMftProgressCallback {
     public:
+        virtual void OnStart(unsigned int totalExpected) = 0;
         virtual void OnProgress(unsigned int recordsRead, unsigned int totalExpected) = 0;
-        virtual void OnComplete(bool success, const std::vector<unsigned char>& rawBuffer, unsigned int recordSize) = 0;
+        virtual void OnChunk(unsigned char* chunkBuffer, size_t chunkSize, unsigned int startFrs, unsigned int recordSize) = 0;
+        virtual void OnComplete(bool success, unsigned int recordSize) = 0;
     };
 
     // class MftReader
