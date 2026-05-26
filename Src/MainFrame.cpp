@@ -397,7 +397,7 @@ LRESULT CMainFrame::OnSettingsCmd(WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL
 }
 
 LRESULT CMainFrame::OnAboutCmd(WORD wNotifyCode, WORD wID, HWND hWndCtl, BOOL& bHandled) {
-    MessageBoxW(L"FastSearch File Indexer v1.0\n\nBuilt with C++ using WTL/ATL.\nNTFS MFT parsing completes indexing in seconds.", 
+    MessageBoxW(L"FastSearch File Indexer v1.1.0\n\nBuilt with C++ using WTL/ATL.\nNTFS MFT parsing completes indexing in seconds.", 
                 L"About FastSearch", MB_OK | MB_ICONINFORMATION);
     return 0;
 }
