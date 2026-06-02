@@ -779,8 +779,17 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     // Retrieve small icon
                                     SHFILEINFOW sfiLocal;
                                     DWORD attribs = record->IsDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
-                                    SHGetFileInfoW(record->Name, attribs, &sfiLocal, sizeof(sfiLocal), 
-                                                   SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+                                    
+                                    wchar_t fullPath[MAX_PATH];
+                                    SearchEngine_GetResultFullPath(data->searchEngine, res, fullPath, MAX_PATH);
+
+                                    if (GetFileAttributesW(fullPath) == INVALID_FILE_ATTRIBUTES) {
+                                        SHGetFileInfoW(record->Name, attribs, &sfiLocal, sizeof(sfiLocal), 
+                                                       SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+                                    } else {
+                                        SHGetFileInfoW(fullPath, attribs, &sfiLocal, sizeof(sfiLocal), 
+                                                       SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+                                    }
 
                                     HIMAGELIST hSmallImgList = ListView_GetImageList(data->listView, LVSIL_SMALL);
                                     if (hSmallImgList && sfiLocal.iIcon >= 0) {
