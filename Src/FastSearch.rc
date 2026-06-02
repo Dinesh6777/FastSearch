@@ -39,6 +39,7 @@ BEGIN
     BEGIN
         MENUITEM "&Columns settings...",        ID_VIEW_SETTINGS
         MENUITEM "&Include Path in Search",     ID_OPTIONS_MATCH_PATH
+        MENUITEM "&Start FastSearch on Startup", ID_OPTIONS_STARTUP
     END
     POPUP "&Help"
     BEGIN

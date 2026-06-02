@@ -59,5 +59,6 @@
 
 // Options checkable path matching
 #define ID_OPTIONS_MATCH_PATH           40030
+#define ID_OPTIONS_STARTUP              40031
 
 #endif // RESOURCE_H

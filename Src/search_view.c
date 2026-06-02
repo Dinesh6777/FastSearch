@@ -861,10 +861,19 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     bool isDir = (res->Record->Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
                                     // Retrieve small icon
+                                    wchar_t fullPath[MAX_PATH];
+                                    SearchEngine_GetResultFullPath(data->searchEngine, res, fullPath, MAX_PATH);
+
                                     SHFILEINFOW sfiLocal;
                                     DWORD attribs = isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
-                                    SHGetFileInfoW(res->Record->Name, attribs, &sfiLocal, sizeof(sfiLocal), 
-                                                   SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+                                    DWORD iconFlags = SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
+                                    
+                                    if (GetFileAttributesW(fullPath) == INVALID_FILE_ATTRIBUTES) {
+                                        iconFlags |= SHGFI_USEFILEATTRIBUTES;
+                                        SHGetFileInfoW(res->Record->Name, attribs, &sfiLocal, sizeof(sfiLocal), iconFlags);
+                                    } else {
+                                        SHGetFileInfoW(fullPath, attribs, &sfiLocal, sizeof(sfiLocal), iconFlags);
+                                    }
 
                                     HIMAGELIST hSmallImgList = ListView_GetImageList(data->listView, LVSIL_SMALL);
                                     if (hSmallImgList && sfiLocal.iIcon >= 0) {

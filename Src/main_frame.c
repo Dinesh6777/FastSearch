@@ -196,6 +196,40 @@ static unsigned int __stdcall WatchdogThreadProc(void* arg) {
     return 0;
 }
 
+static bool IsStartupEnabled(void) {
+    HKEY hKey;
+    bool enabled = false;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD dwType = REG_SZ;
+        wchar_t buf[512] = { 0 };
+        DWORD dwSize = sizeof(buf);
+        if (RegQueryValueExW(hKey, L"FastSearch", NULL, &dwType, (LPBYTE)buf, &dwSize) == ERROR_SUCCESS) {
+            enabled = (wcslen(buf) > 0);
+        }
+        RegCloseKey(hKey);
+    }
+    return enabled;
+}
+
+static void SetStartupEnabled(bool enable) {
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+        if (enable) {
+            wchar_t exePath[MAX_PATH];
+            GetModuleFileNameW(NULL, exePath, MAX_PATH);
+            
+            // Format exe path with quotes for safety
+            wchar_t quotedPath[MAX_PATH + 2];
+            swprintf_s(quotedPath, MAX_PATH + 2, L"\"%s\"", exePath);
+            
+            RegSetValueExW(hKey, L"FastSearch", 0, REG_SZ, (const BYTE*)quotedPath, (DWORD)((wcslen(quotedPath) + 1) * sizeof(wchar_t)));
+        } else {
+            RegDeleteValueW(hKey, L"FastSearch");
+        }
+        RegCloseKey(hKey);
+    }
+}
+
 // Main Frame window procedure
 static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     MainFrameData* data = (MainFrameData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
@@ -273,6 +307,7 @@ static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             if (hMenu) {
                 CheckMenuRadioItem(hMenu, ID_VIEW_DETAILS, ID_VIEW_EXTRA_LARGE_ICONS, ID_VIEW_DETAILS, MF_BYCOMMAND);
                 CheckMenuItem(hMenu, ID_HELP_ENABLE_LOGGING, Logger_IsEnabled() ? MF_CHECKED : MF_UNCHECKED);
+                CheckMenuItem(hMenu, ID_OPTIONS_STARTUP, IsStartupEnabled() ? MF_CHECKED : MF_UNCHECKED);
             }
 
             // Register PnP external volume device arrivals/removals
@@ -547,6 +582,14 @@ static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
                 // Refresh active search view immediately
                 if (data->activeTabIndex != -1 && data->activeTabIndex < data->tabsCount) {
                     SearchView_TriggerSearch(data->tabs[data->activeTabIndex].View);
+                }
+            }
+            else if (id == ID_OPTIONS_STARTUP) {
+                bool enabled = !IsStartupEnabled();
+                SetStartupEnabled(enabled);
+                HMENU hMenu = GetMenu(hWnd);
+                if (hMenu) {
+                    CheckMenuItem(hMenu, ID_OPTIONS_STARTUP, enabled ? MF_CHECKED : MF_UNCHECKED);
                 }
             }
             else if (id == ID_HELP_ABOUT) {
