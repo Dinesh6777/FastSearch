@@ -111,7 +111,7 @@ void Logger_Log(const wchar_t* level, const wchar_t* format, ...) {
 
     FILE* file = NULL;
     // Open file in append mode with UTF-8 encoding
-    if (_wfopen_s(&file, logPath, L"ab, ccs=UTF-8") == 0 && file) {
+    if (_wfopen_s(&file, logPath, L"a, ccs=UTF-8") == 0 && file) {
         SYSTEMTIME st;
         GetLocalTime(&st);
 
