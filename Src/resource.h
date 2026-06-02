@@ -1,4 +1,5 @@
-#pragma once
+#ifndef RESOURCE_H
+#define RESOURCE_H
 
 // Application Icon and Cursor
 #define IDI_APP                         101
@@ -10,6 +11,7 @@
 
 // Dialog Templates
 #define IDD_SETTINGS                    301
+#define IDD_INPUT                       302
 
 // Control IDs
 #define IDC_TAB_CTRL                    1001
@@ -29,9 +31,6 @@
 #define IDC_CHECK_CREATED               2006
 #define IDC_CHECK_ACCESSED              2007
 #define IDC_CHECK_ATTRIBUTES            2008
-
-// Dialog Templates
-#define IDD_INPUT                       302
 
 // Input Dialog Controls
 #define IDC_INPUT_EDIT                  1008
@@ -56,3 +55,8 @@
 #define ID_TRAY_RESTORE                 40010
 #define ID_TRAY_EXIT                    40011
 #define ID_TRAY_NEW_WINDOW              40012
+
+// Options checkable path matching
+#define ID_OPTIONS_MATCH_PATH           40030
+
+#endif // RESOURCE_H

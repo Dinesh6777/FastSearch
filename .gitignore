@@ -2,4 +2,6 @@ swiftsearch-code/
 x64/
 Src/x64/
 temp/
-Src/Win32/
+Src/bin/
+implementation_plan.md
+c++ Source/

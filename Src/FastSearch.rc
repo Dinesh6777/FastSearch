@@ -1,8 +1,11 @@
 #include "resource.h"
 #include <windows.h>
 
+// Manifest for visual styles and elevation
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "FastSearch.manifest"
+
 // Icons
-IDR_MAINFRAME ICON    "FastSearch.ico"
+IDI_APP      ICON    "FastSearch.ico"
 IDI_TRAY     ICON    "FastSearch.ico"
 
 // Main Accelerator Table for standard shortcuts
@@ -35,6 +38,7 @@ BEGIN
     POPUP "&Options"
     BEGIN
         MENUITEM "&Columns settings...",        ID_VIEW_SETTINGS
+        MENUITEM "&Include Path in Search",     ID_OPTIONS_MATCH_PATH
     END
     POPUP "&Help"
     BEGIN
@@ -122,4 +126,3 @@ BEGIN
         VALUE "Translation", 0x409, 1200
     END
 END
-
