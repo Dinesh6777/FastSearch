@@ -1,11 +1,13 @@
 #include "main_frame.h"
 #include "search_view.h"
 #include "settings_dialog.h"
+#include "fs_logger.h"
 #include "resource.h"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <dbt.h>
 #include <shellapi.h>
+#include <process.h>
 
 #define WM_SEARCH_RESULTS_CHANGED (WM_USER + 101)
 #define WM_NTFS_INDEX_CHANGED (WM_USER + 102)
@@ -89,6 +91,111 @@ static void FrameOnIndexComplete(void* context, wchar_t drive, bool success, uns
     }
 }
 
+// Dynamic Minidump writer helper
+static void WriteHangMinidump(void) {
+    HMODULE hDbgHelp = LoadLibraryW(L"dbghelp.dll");
+    if (!hDbgHelp) {
+        LOG_ERROR(L"Watchdog: dbghelp.dll could not be loaded. Cannot write minidump.");
+        return;
+    }
+
+    typedef BOOL (WINAPI* MINIDUMPWRITEDUMP)(
+        HANDLE hProcess,
+        DWORD ProcessId,
+        HANDLE hFile,
+        int DumpType,
+        void* ExceptionParam,
+        void* UserStreamParam,
+        void* CallbackParam
+    );
+
+    MINIDUMPWRITEDUMP pDump = (MINIDUMPWRITEDUMP)GetProcAddress(hDbgHelp, "MiniDumpWriteDump");
+    if (!pDump) {
+        LOG_ERROR(L"Watchdog: MiniDumpWriteDump function not found in dbghelp.dll.");
+        FreeLibrary(hDbgHelp);
+        return;
+    }
+
+    // Resolve portable path for FastSearch_Hang.dmp
+    wchar_t dumpPath[MAX_PATH];
+    GetModuleFileNameW(NULL, dumpPath, MAX_PATH);
+    wchar_t* lastSlash = wcsrchr(dumpPath, L'\\');
+    if (lastSlash) {
+        *(lastSlash + 1) = L'\0';
+    }
+    wcscat_s(dumpPath, MAX_PATH, L"FastSearch_Hang.dmp");
+
+    HANDLE hFile = CreateFileW(
+        dumpPath,
+        GENERIC_WRITE,
+        0,
+        NULL,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL
+    );
+
+    if (hFile != INVALID_HANDLE_VALUE) {
+        // MiniDumpWithDataSegs | MiniDumpWithHandleData | MiniDumpWithThreadInfo
+        BOOL success = pDump(
+            GetCurrentProcess(),
+            GetCurrentProcessId(),
+            hFile,
+            0x00000001 | 0x00000004 | 0x00000100, // standard minidump flags
+            NULL,
+            NULL,
+            NULL
+        );
+        CloseHandle(hFile);
+        if (success) {
+            LOG_ERROR(L"Watchdog: Created crash/hang minidump at '%s'. Open it in Visual Studio to debug!", dumpPath);
+        } else {
+            LOG_ERROR(L"Watchdog: MiniDumpWriteDump failed with error %d.", GetLastError());
+        }
+    } else {
+        LOG_ERROR(L"Watchdog: Failed to create minidump file at '%s'. Error: %d", dumpPath, GetLastError());
+    }
+
+    FreeLibrary(hDbgHelp);
+}
+
+static unsigned int __stdcall WatchdogThreadProc(void* arg) {
+    HWND hwnd = (HWND)arg;
+    bool wasHung = false;
+    LOG_INFO(L"Watchdog: UI Thread monitor started.");
+
+    while (IsWindow(hwnd)) {
+        Sleep(2000); // Check every 2 seconds
+        if (!IsWindow(hwnd)) break;
+
+        DWORD_PTR result = 0;
+        // Ping the main UI thread with a 3-second timeout
+        LRESULT res = SendMessageTimeoutW(
+            hwnd,
+            WM_NULL, // safe no-op message
+            0, 0,
+            SMTO_BLOCK | SMTO_ABORTIFHUNG,
+            3000, // 3 seconds timeout
+            &result
+        );
+
+        if (res == 0) {
+            if (!wasHung) {
+                LOG_ERROR(L"Watchdog: Main UI Thread is NOT RESPONDING (frozen / hung!)");
+                wasHung = true;
+                WriteHangMinidump();
+            }
+        } else {
+            if (wasHung) {
+                LOG_INFO(L"Watchdog: Main UI Thread recovered and is now responsive.");
+                wasHung = false;
+            }
+        }
+    }
+    LOG_INFO(L"Watchdog: UI Thread monitor stopped.");
+    return 0;
+}
+
 // Main Frame window procedure
 static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     MainFrameData* data = (MainFrameData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
@@ -161,10 +268,11 @@ static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
 
             AddTrayIcon(data);
 
-            // Default View menu style radio check
+            // Default View menu style radio check and Logging check
             HMENU hMenu = GetMenu(hWnd);
             if (hMenu) {
                 CheckMenuRadioItem(hMenu, ID_VIEW_DETAILS, ID_VIEW_EXTRA_LARGE_ICONS, ID_VIEW_DETAILS, MF_BYCOMMAND);
+                CheckMenuItem(hMenu, ID_HELP_ENABLE_LOGGING, Logger_IsEnabled() ? MF_CHECKED : MF_UNCHECKED);
             }
 
             // Register PnP external volume device arrivals/removals
@@ -179,6 +287,12 @@ static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
                 &notificationFilter,
                 DEVICE_NOTIFY_WINDOW_HANDLE
             );
+
+            // Spawn the UI freeze Watchdog background thread
+            HANDLE hWatchdog = (HANDLE)_beginthreadex(NULL, 0, WatchdogThreadProc, (void*)hWnd, 0, NULL);
+            if (hWatchdog) {
+                CloseHandle(hWatchdog); // Detach thread
+            }
 
             return 0;
         }
@@ -438,6 +552,14 @@ static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             else if (id == ID_HELP_ABOUT) {
                 MessageBoxW(hWnd, L"FastSearch File Indexer v1.1.0\n\nBuilt in C utilizing raw Win32 APIs.\nNTFS MFT pre-sorted contiguous indexing completes searches in milliseconds.", 
                             L"About FastSearch", MB_OK | MB_ICONINFORMATION);
+            }
+            else if (id == ID_HELP_ENABLE_LOGGING) {
+                bool enabled = !Logger_IsEnabled();
+                Logger_SetEnabled(enabled);
+                HMENU hMenu = GetMenu(hWnd);
+                if (hMenu) {
+                    CheckMenuItem(hMenu, ID_HELP_ENABLE_LOGGING, enabled ? MF_CHECKED : MF_UNCHECKED);
+                }
             }
             else if (id == ID_TRAY_RESTORE) {
                 ShowWindow(hWnd, SW_RESTORE);

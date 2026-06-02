@@ -42,6 +42,8 @@ BEGIN
     END
     POPUP "&Help"
     BEGIN
+        MENUITEM "&Enable Logging",             ID_HELP_ENABLE_LOGGING
+        MENUITEM SEPARATOR
         MENUITEM "&About FastSearch",           ID_HELP_ABOUT
     END
 END

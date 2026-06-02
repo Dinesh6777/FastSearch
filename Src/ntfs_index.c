@@ -490,6 +490,84 @@ size_t NtfsIndex_ResolveFullPathToBufByFrs(const NtfsIndex* index, unsigned int 
     return NtfsIndex_ResolveFullPathToBuf(index, index->recordsByFrs[recordIndex], outBuf, maxChars);
 }
 
+size_t NtfsIndex_ResolveFullPathFromParent(const NtfsIndex* index, unsigned int parentFrs, const wchar_t* name, wchar_t* outBuf, size_t maxChars) {
+    if (maxChars == 0) return 0;
+    
+    // If parentFrs is 0 or 5 (root), path is just Drive:\name
+    if (parentFrs == 0 || parentFrs == 5 || parentFrs == 0xFFFFFFFF) {
+        size_t written = 0;
+        if (maxChars > 4) {
+            outBuf[0] = index->driveLetter;
+            outBuf[1] = L':';
+            outBuf[2] = L'\\';
+            outBuf[3] = L'\0';
+            written = 3;
+        }
+        size_t nameLen = name ? wcslen(name) : 0;
+        if (written + nameLen + 1 <= maxChars) {
+            wcscpy_s(outBuf + written, maxChars - written, name);
+            written += nameLen;
+        }
+        outBuf[written] = L'\0';
+        return written;
+    }
+
+    // Collect parent references on the stack (max depth 256)
+    const FileRecord* pathRecords[256];
+    int depth = 0;
+    
+    unsigned int current = parentFrs;
+    
+    // Walk up the parent tree recursively to root FRS (5 or 0)
+    while (current < index->recordsCount && current != 5 && current != 0 && depth < 256) {
+        const FileRecord* pRec = index->recordsByFrs[current];
+        if (!pRec || !pRec->Name || pRec->Name[0] == L'\0') {
+            break;
+        }
+        if (pRec->ParentFrs == 0xFFFFFFFF || pRec->ParentFrs == current) {
+            break;
+        }
+        pathRecords[depth++] = pRec;
+        current = pRec->ParentFrs;
+    }
+    
+    size_t written = 0;
+    if (maxChars > 4) {
+        outBuf[0] = index->driveLetter;
+        outBuf[1] = L':';
+        outBuf[2] = L'\\';
+        outBuf[3] = L'\0';
+        written = 3;
+    }
+    
+    // Join paths forwards: parents to children
+    for (int i = depth - 1; i >= 0; --i) {
+        const FileRecord* pRec = pathRecords[i];
+        size_t nameLen = wcslen(pRec->Name);
+        if (written + nameLen + 2 > maxChars) {
+            break;
+        }
+        if (i < depth - 1) {
+            outBuf[written++] = L'\\';
+        }
+        wcscpy_s(outBuf + written, maxChars - written, pRec->Name);
+        written += nameLen;
+    }
+
+    // Append a slash and the leaf item name
+    size_t nameLen = name ? wcslen(name) : 0;
+    if (written + nameLen + 2 <= maxChars) {
+        if (depth > 0) {
+            outBuf[written++] = L'\\';
+        }
+        wcscpy_s(outBuf + written, maxChars - written, name);
+        written += nameLen;
+    }
+    
+    outBuf[written] = L'\0';
+    return written;
+}
+
 // Binary search to find sorted index in activeRecords
 static int FindActiveRecordIndex(FileRecord** active, size_t count, const FileRecord* target, int* out_exact) {
     int low = 0;

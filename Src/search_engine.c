@@ -352,7 +352,16 @@ void SearchEngine_ExecuteSearch(SearchEngine* engine, const wchar_t* query, Matc
                 if (matched) {
                     SearchResult res;
                     res.Drive = letter;
-                    res.Record = item;
+                    wcsncpy_s(res.Name, 260, item->Name, _TRUNCATE);
+                    res.Frs = item->Frs;
+                    res.ParentFrs = item->ParentFrs;
+                    res.Size = item->Size;
+                    res.SizeOnDisk = item->SizeOnDisk;
+                    res.DateCreated = item->DateCreated;
+                    res.DateModified = item->DateModified;
+                    res.DateAccessed = item->DateAccessed;
+                    res.Attributes = item->Attributes;
+                    res.IsDirectory = item->IsDirectory;
                     DYNARRAY_ADD(*outResults, res);
                 }
             }
@@ -372,7 +381,7 @@ size_t SearchEngine_GetResultFullPath(const SearchEngine* engine, const SearchRe
     for (int i = 0; i < engine->drivesCount; i++) {
         if (engine->drives[i].Index->driveLetter == result->Drive) {
             NtfsIndex_LockShared(engine->drives[i].Index);
-            written = NtfsIndex_ResolveFullPathToBuf(engine->drives[i].Index, result->Record, outBuf, maxChars);
+            written = NtfsIndex_ResolveFullPathFromParent(engine->drives[i].Index, result->ParentFrs, result->Name, outBuf, maxChars);
             NtfsIndex_UnlockShared(engine->drives[i].Index);
             break;
         }

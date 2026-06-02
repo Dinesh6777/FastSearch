@@ -52,6 +52,7 @@ void NtfsIndex_FinalizeIndex(NtfsIndex* index);
 // Zero-allocation canonical path resolution
 size_t NtfsIndex_ResolveFullPathToBuf(const NtfsIndex* index, const FileRecord* item, wchar_t* outBuf, size_t maxChars);
 size_t NtfsIndex_ResolveFullPathToBufByFrs(const NtfsIndex* index, unsigned int recordIndex, wchar_t* outBuf, size_t maxChars);
+size_t NtfsIndex_ResolveFullPathFromParent(const NtfsIndex* index, unsigned int parentFrs, const wchar_t* name, wchar_t* outBuf, size_t maxChars);
 
 // Incremental changes (USN updates)
 void NtfsIndex_AddOrUpdateRecord(NtfsIndex* index, unsigned int recordIndex, const wchar_t* name, unsigned int parentFrs, 

@@ -8,7 +8,16 @@
 
 // Search result structure
 typedef struct {
-    const FileRecord* Record;
+    wchar_t Name[260];
+    unsigned int Frs;
+    unsigned int ParentFrs;
+    unsigned long long Size;
+    unsigned long long SizeOnDisk;
+    unsigned long long DateCreated;
+    unsigned long long DateModified;
+    unsigned long long DateAccessed;
+    unsigned int Attributes;
+    bool IsDirectory;
     wchar_t Drive;
 } SearchResult;
 

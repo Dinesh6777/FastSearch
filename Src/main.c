@@ -2,12 +2,16 @@
 #include "search_engine.h"
 #include "main_frame.h"
 #include "search_view.h"
+#include "fs_logger.h"
 #include "resource.h"
 #include <commctrl.h>
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
     (void)hPrevInstance;
     (void)lpCmdLine;
+
+    // Initialize global logger
+    Logger_Init();
 
     // 1. Initialize modern graphical visual styles (Common Controls v6)
     INITCOMMONCONTROLSEX icex;
@@ -68,6 +72,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // 7. Cleanup
     SearchEngine_Destroy(engine);
     OleUninitialize();
+    Logger_Shutdown();
 
     return (int)msg.wParam;
 }

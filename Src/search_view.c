@@ -204,16 +204,9 @@ static int CompareResults(const void* a, const void* b) {
     SearchViewData* data = g_SortData;
     if (!data) return 0;
 
-    const FileRecord* recA = resA->Record;
-    const FileRecord* recB = resB->Record;
-
-    if (!recA && !recB) return 0;
-    if (!recA) return 1;
-    if (!recB) return -1;
-
     // Always keep standard system '$' metadata files at the end
-    bool aStartsWithDollar = (recA->Name && recA->Name[0] == L'$');
-    bool bStartsWithDollar = (recB->Name && recB->Name[0] == L'$');
+    bool aStartsWithDollar = (resA->Name[0] == L'$');
+    bool bStartsWithDollar = (resB->Name[0] == L'$');
     if (aStartsWithDollar != bStartsWithDollar) {
         return aStartsWithDollar ? 1 : -1;
     }
@@ -223,7 +216,7 @@ static int CompareResults(const void* a, const void* b) {
 
     switch (flag) {
         case COL_NAME:
-            res = _wcsicmp(recA->Name, recB->Name);
+            res = _wcsicmp(resA->Name, resB->Name);
             break;
         case COL_PATH: {
             wchar_t pathA[MAX_PATH];
@@ -234,22 +227,22 @@ static int CompareResults(const void* a, const void* b) {
             break;
         }
         case COL_SIZE:
-            res = recA->Size < recB->Size ? -1 : (recA->Size > recB->Size ? 1 : 0);
+            res = resA->Size < resB->Size ? -1 : (resA->Size > resB->Size ? 1 : 0);
             break;
         case COL_SIZE_DISK:
-            res = recA->SizeOnDisk < recB->SizeOnDisk ? -1 : (recA->SizeOnDisk > recB->SizeOnDisk ? 1 : 0);
+            res = resA->SizeOnDisk < resB->SizeOnDisk ? -1 : (resA->SizeOnDisk > resB->SizeOnDisk ? 1 : 0);
             break;
         case COL_MODIFIED:
-            res = recA->DateModified < recB->DateModified ? -1 : (recA->DateModified > recB->DateModified ? 1 : 0);
+            res = resA->DateModified < resB->DateModified ? -1 : (resA->DateModified > resB->DateModified ? 1 : 0);
             break;
         case COL_CREATED:
-            res = recA->DateCreated < recB->DateCreated ? -1 : (recA->DateCreated > recB->DateCreated ? 1 : 0);
+            res = resA->DateCreated < resB->DateCreated ? -1 : (resA->DateCreated > resB->DateCreated ? 1 : 0);
             break;
         case COL_ACCESSED:
-            res = recA->DateAccessed < recB->DateAccessed ? -1 : (recA->DateAccessed > recB->DateAccessed ? 1 : 0);
+            res = resA->DateAccessed < resB->DateAccessed ? -1 : (resA->DateAccessed > resB->DateAccessed ? 1 : 0);
             break;
         case COL_ATTRIBUTES:
-            res = recA->Attributes < recB->Attributes ? -1 : (recA->Attributes > recB->Attributes ? 1 : 0);
+            res = resA->Attributes < resB->Attributes ? -1 : (resA->Attributes > resB->Attributes ? 1 : 0);
             break;
     }
 
@@ -581,13 +574,6 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                         if (idx < 0 || idx >= (int)data->results.count) return 0;
 
                         const SearchResult* res = &data->results.data[idx];
-                        
-                        SearchEngine_LockDrivesShared(data->searchEngine);
-                        const FileRecord* record = res->Record;
-                        if (!record) {
-                            SearchEngine_UnlockDrivesShared(data->searchEngine);
-                            return 0;
-                        }
 
                         if (pDispInfo->item.mask & LVIF_TEXT) {
                             int subItem = pDispInfo->item.iSubItem;
@@ -597,7 +583,7 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
 
                                 switch (flag) {
                                     case COL_NAME:
-                                        wcsncpy_s(temp, MAX_PATH, record->Name, _TRUNCATE);
+                                        wcsncpy_s(temp, MAX_PATH, res->Name, _TRUNCATE);
                                         break;
                                     case COL_PATH:
                                         SearchEngine_GetResultFullPath(data->searchEngine, res, temp, MAX_PATH);
@@ -606,22 +592,22 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                         if (lastSlash) *lastSlash = L'\0';
                                         break;
                                     case COL_SIZE:
-                                        if (!record->IsDirectory) FormatFileSize(record->Size, temp, MAX_PATH);
+                                        if (!res->IsDirectory) FormatFileSize(res->Size, temp, MAX_PATH);
                                         break;
                                     case COL_SIZE_DISK:
-                                        if (!record->IsDirectory) FormatFileSize(record->SizeOnDisk, temp, MAX_PATH);
+                                        if (!res->IsDirectory) FormatFileSize(res->SizeOnDisk, temp, MAX_PATH);
                                         break;
                                     case COL_MODIFIED:
-                                        FormatFileTime(record->DateModified, temp, MAX_PATH);
+                                        FormatFileTime(res->DateModified, temp, MAX_PATH);
                                         break;
                                     case COL_CREATED:
-                                        FormatFileTime(record->DateCreated, temp, MAX_PATH);
+                                        FormatFileTime(res->DateCreated, temp, MAX_PATH);
                                         break;
                                     case COL_ACCESSED:
-                                        FormatFileTime(record->DateAccessed, temp, MAX_PATH);
+                                        FormatFileTime(res->DateAccessed, temp, MAX_PATH);
                                         break;
                                     case COL_ATTRIBUTES:
-                                        FormatAttributes(record->Attributes, temp, MAX_PATH);
+                                        FormatAttributes(res->Attributes, temp, MAX_PATH);
                                         break;
                                 }
                                 wcsncpy_s(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, temp, _TRUNCATE);
@@ -630,7 +616,7 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
 
                         if (pDispInfo->item.mask & LVIF_IMAGE) {
                             SHFILEINFOW sfiLocal;
-                            DWORD attribs = record->IsDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                            DWORD attribs = res->IsDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
                             
                             DWORD dwStyle = GetWindowLong(data->listView, GWL_STYLE);
                             DWORD dwView = dwStyle & LVS_TYPEMASK;
@@ -643,14 +629,13 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
 
                             if (GetFileAttributesW(fullPath) == INVALID_FILE_ATTRIBUTES) {
                                 iconFlags |= SHGFI_USEFILEATTRIBUTES;
-                                SHGetFileInfoW(record->Name, attribs, &sfiLocal, sizeof(sfiLocal), iconFlags);
+                                SHGetFileInfoW(res->Name, attribs, &sfiLocal, sizeof(sfiLocal), iconFlags);
                             } else {
                                 SHGetFileInfoW(fullPath, attribs, &sfiLocal, sizeof(sfiLocal), iconFlags);
                             }
                             pDispInfo->item.iImage = sfiLocal.iIcon;
                         }
 
-                        SearchEngine_UnlockDrivesShared(data->searchEngine);
                         return 0;
                     }
                     case LVN_COLUMNCLICK: {
@@ -769,27 +754,12 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     DeleteObject(hBgBrush);
 
                                     const SearchResult* res = &data->results.data[itemIdx];
-                                    SearchEngine_LockDrivesShared(data->searchEngine);
-                                    const FileRecord* record = res->Record;
-                                    if (!record) {
-                                        SearchEngine_UnlockDrivesShared(data->searchEngine);
-                                        return CDRF_DODEFAULT;
-                                    }
 
                                     // Retrieve small icon
                                     SHFILEINFOW sfiLocal;
-                                    DWORD attribs = record->IsDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
-                                    
-                                    wchar_t fullPath[MAX_PATH];
-                                    SearchEngine_GetResultFullPath(data->searchEngine, res, fullPath, MAX_PATH);
-
-                                    if (GetFileAttributesW(fullPath) == INVALID_FILE_ATTRIBUTES) {
-                                        SHGetFileInfoW(record->Name, attribs, &sfiLocal, sizeof(sfiLocal), 
-                                                       SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
-                                    } else {
-                                        SHGetFileInfoW(fullPath, attribs, &sfiLocal, sizeof(sfiLocal), 
-                                                       SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
-                                    }
+                                    DWORD attribs = res->IsDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                                    SHGetFileInfoW(res->Name, attribs, &sfiLocal, sizeof(sfiLocal), 
+                                                   SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
 
                                     HIMAGELIST hSmallImgList = ListView_GetImageList(data->listView, LVSIL_SMALL);
                                     if (hSmallImgList && sfiLocal.iIcon >= 0) {
@@ -806,7 +776,7 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     rc.left += 24; // padding offset for icon
 
                                     // Split words for text term highlights
-                                    const wchar_t* name = record->Name;
+                                    const wchar_t* name = res->Name;
                                     size_t nameLen = wcslen(name);
                                     
                                     wchar_t* nameLower = (wchar_t*)malloc((nameLen + 1) * sizeof(wchar_t));
@@ -892,7 +862,6 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     if (highlighted) free(highlighted);
 
                                     SelectObject(hdc, hOldFont);
-                                    SearchEngine_UnlockDrivesShared(data->searchEngine);
                                     return CDRF_SKIPDEFAULT;
                                 } else {
                                     pLVCD->clrText = clrText;
@@ -1256,12 +1225,8 @@ bool SearchView_ExportResults(HWND hwndView, const wchar_t* filePath) {
 
     fwprintf(file, L"%s%c%s%c%s%c%s%c%s\n", escName, sep, escPath, sep, escSize, sep, escSizeDisk, sep, escMod);
 
-    SearchEngine_LockDrivesShared(data->searchEngine);
-
     for (size_t i = 0; i < data->results.count; i++) {
         const SearchResult* res = &data->results.data[i];
-        const FileRecord* record = res->Record;
-        if (!record) continue;
 
         wchar_t fullPath[MAX_PATH];
         SearchEngine_GetResultFullPath(data->searchEngine, res, fullPath, MAX_PATH);
@@ -1270,13 +1235,13 @@ bool SearchView_ExportResults(HWND hwndView, const wchar_t* filePath) {
         wchar_t sizeDiskStr[64] = { 0 };
         wchar_t modStr[64] = { 0 };
 
-        if (!record->IsDirectory) {
-            FormatFileSize(record->Size, sizeStr, 64);
-            FormatFileSize(record->SizeOnDisk, sizeDiskStr, 64);
+        if (!res->IsDirectory) {
+            FormatFileSize(res->Size, sizeStr, 64);
+            FormatFileSize(res->SizeOnDisk, sizeDiskStr, 64);
         }
-        FormatFileTime(record->DateModified, modStr, 64);
+        FormatFileTime(res->DateModified, modStr, 64);
 
-        EscapeVal(isCsv, record->Name, escName, 260);
+        EscapeVal(isCsv, res->Name, escName, 260);
         EscapeVal(isCsv, fullPath, escPath, MAX_PATH);
         EscapeVal(isCsv, sizeStr, escSize, 64);
         EscapeVal(isCsv, sizeDiskStr, escSizeDisk, 64);
@@ -1284,8 +1249,6 @@ bool SearchView_ExportResults(HWND hwndView, const wchar_t* filePath) {
 
         fwprintf(file, L"%s%c%s%c%s%c%s%c%s\n", escName, sep, escPath, sep, escSize, sep, escSizeDisk, sep, escMod);
     }
-
-    SearchEngine_UnlockDrivesShared(data->searchEngine);
 
     fclose(file);
     return true;

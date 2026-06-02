@@ -43,6 +43,7 @@
 #define ID_FILE_EXIT                    40004
 #define ID_VIEW_SETTINGS                40005
 #define ID_HELP_ABOUT                   40006
+#define ID_HELP_ENABLE_LOGGING          40040
 
 // View Menu Commands
 #define ID_VIEW_DETAILS                 40020
