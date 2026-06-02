@@ -34,6 +34,18 @@ typedef struct {
     
     WNDPROC oldEditWndProc;                // Subclass backup for Search Edit box
     WNDPROC oldListWndProc;                // Subclass backup for ListView control
+
+    HANDLE hSearchThread;                  // Background search thread
+    HANDLE hSearchEvent;                   // Signaled when a new search is pending
+    CRITICAL_SECTION searchInputMutex;     // Mutex protecting inputs passed to background thread
+    wchar_t* pendingQuery;                 // The query string to search for
+    MatchMode pendingMode;
+    wchar_t pendingDrive;
+    FilterType pendingFilter;
+    volatile LONG cancelSearch;            // Signaled to cancel active search
+    volatile LONG isSearching;             // Flag indicating search is running
+    bool isTerminating;                    // Flag to clean up thread
+    StringMatcher highlightMatcher;        // Matcher for visual highlight in custom draw
 } SearchViewData;
 
 // Registers search view custom window class

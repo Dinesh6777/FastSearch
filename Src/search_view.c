@@ -7,6 +7,13 @@
 #include <shlobj.h>
 #include <commoncontrols.h>
 #include <math.h>
+#include <process.h>
+
+#define WM_SEARCH_COMPLETE (WM_USER + 110)
+
+// Forward declarations for background thread result sorting
+static SearchViewData* g_SortData;
+static int CompareResults(const void* a, const void* b);
 
 #define WM_SEARCH_RESULTS_CHANGED (WM_USER + 101)
 #define WM_NTFS_INDEX_CHANGED (WM_USER + 102)
@@ -195,8 +202,94 @@ static LRESULT CALLBACK ListSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
     return CallWindowProc(oldProc, hWnd, uMsg, wParam, lParam);
 }
 
+static unsigned int __stdcall SearchThreadProc(void* arg) {
+    SearchViewData* data = (SearchViewData*)arg;
+    
+    while (!data->isTerminating) {
+        // Wait for search signal or termination
+        DWORD waitRes = WaitForSingleObject(data->hSearchEvent, INFINITE);
+        if (waitRes != WAIT_OBJECT_0 || data->isTerminating) {
+            break;
+        }
+
+        // Reset event immediately
+        ResetEvent(data->hSearchEvent);
+
+        // Copy inputs under lock
+        EnterCriticalSection(&data->searchInputMutex);
+        wchar_t* query = data->pendingQuery ? _wcsdup(data->pendingQuery) : _wcsdup(L"");
+        MatchMode mode = data->pendingMode;
+        wchar_t driveLetter = data->pendingDrive;
+        FilterType filter = data->pendingFilter;
+        LeaveCriticalSection(&data->searchInputMutex);
+
+        InterlockedExchange(&data->cancelSearch, 0);
+        InterlockedExchange(&data->isSearching, 1);
+
+        LARGE_INTEGER freq, start, end;
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&start);
+
+        // Execute the search with cancel support
+        SearchResultList tempResults;
+        DYNARRAY_INIT(tempResults);
+
+        StringMatcher threadMatcher;
+        StringMatcher_Init(&threadMatcher);
+        StringMatcher_SetPattern(&threadMatcher, query, mode, false);
+
+        bool success = SearchEngine_ExecuteSearch(
+            data->searchEngine,
+            &threadMatcher,
+            driveLetter,
+            filter,
+            &tempResults,
+            &data->cancelSearch
+        );
+
+        free(query);
+
+        if (success && !InterlockedOr(&data->cancelSearch, 0)) {
+            // Apply sorting if enabled on the background thread!
+            if (data->sortColumn != -1 && tempResults.count > 0) {
+                SearchEngine_LockDrivesShared(data->searchEngine);
+                g_SortData = data;
+                qsort(tempResults.data, tempResults.count, sizeof(SearchResult), CompareResults);
+                g_SortData = NULL;
+                SearchEngine_UnlockDrivesShared(data->searchEngine);
+            }
+
+            QueryPerformanceCounter(&end);
+            double elapsedMs = (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart;
+
+            // Lock view results and swap atomically
+            EnterCriticalSection(&data->searchInputMutex);
+            DYNARRAY_FREE(data->results);
+            data->results.data = tempResults.data;
+            data->results.count = tempResults.count;
+            data->results.capacity = tempResults.capacity;
+            data->lastSearchTimeMs = elapsedMs;
+
+            // Swap highlightMatcher
+            StringMatcher_Free(&data->highlightMatcher);
+            data->highlightMatcher = threadMatcher;
+            LeaveCriticalSection(&data->searchInputMutex);
+
+            // Post completion back to UI thread
+            PostMessageW(data->hWnd, WM_SEARCH_COMPLETE, 0, 0);
+        } else {
+            // Aborted: Clean up temp results and threadMatcher
+            DYNARRAY_FREE(tempResults);
+            StringMatcher_Free(&threadMatcher);
+        }
+
+        InterlockedExchange(&data->isSearching, 0);
+    }
+    return 0;
+}
+
 // Global search result sorting comparator
-static SearchViewData* g_SortData = NULL;
+// (g_SortData is declared as static at the top of the file)
 
 static int CompareResults(const void* a, const void* b) {
     const SearchResult* resA = (const SearchResult*)a;
@@ -251,10 +344,6 @@ static int CompareResults(const void* a, const void* b) {
 
 // Run search query and display results in Virtual ListView
 static void RunSearchInternal(SearchViewData* data) {
-    LARGE_INTEGER freq, start, end;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&start);
-
     // Get search edit box text
     int len = GetWindowTextLengthW(data->searchEdit);
     wchar_t* query = (wchar_t*)malloc((len + 1) * sizeof(wchar_t));
@@ -284,33 +373,20 @@ static void RunSearchInternal(SearchViewData* data) {
         mode = MatchMode_Wildcard;
     }
 
-    SearchEngine_ExecuteSearch(data->searchEngine, query, mode, driveLetter, filter, &data->results);
-    free(query);
+    // Signal cancellation of any running background search immediately
+    InterlockedExchange(&data->cancelSearch, 1);
 
-    // Reapply sorting if enabled
-    if (data->sortColumn != -1 && data->results.count > 0) {
-        SearchEngine_LockDrivesShared(data->searchEngine);
-        g_SortData = data;
-        qsort(data->results.data, data->results.count, sizeof(SearchResult), CompareResults);
-        g_SortData = NULL;
-        SearchEngine_UnlockDrivesShared(data->searchEngine);
-    }
+    // Update pending inputs under lock
+    EnterCriticalSection(&data->searchInputMutex);
+    if (data->pendingQuery) free(data->pendingQuery);
+    data->pendingQuery = query;
+    data->pendingMode = mode;
+    data->pendingDrive = driveLetter;
+    data->pendingFilter = filter;
+    LeaveCriticalSection(&data->searchInputMutex);
 
-    QueryPerformanceCounter(&end);
-    data->lastSearchTimeMs = (double)(end.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart;
-
-    // Set virtual items count and force redraw of all visible items
-    ListView_SetItemCount(data->listView, (int)data->results.count);
-    if (data->results.count > 0) {
-        ListView_RedrawItems(data->listView, 0, (int)data->results.count - 1);
-    }
-    InvalidateRect(data->listView, NULL, FALSE);
-    UpdateWindow(data->listView);
-
-    // Post results count change notification to MainFrame
-    if (IsWindow(GetParent(data->hWnd))) {
-        PostMessageW(GetParent(data->hWnd), WM_SEARCH_RESULTS_CHANGED, 0, 0);
-    }
+    // Wake up the search worker thread
+    SetEvent(data->hSearchEvent);
 }
 
 // Helpers to format files attributes, sizes, and times
@@ -382,6 +458,24 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
     SearchViewData* data = (SearchViewData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
 
     switch (uMsg) {
+        case WM_SEARCH_COMPLETE: {
+            if (!data) return 0;
+            EnterCriticalSection(&data->searchInputMutex);
+            int count = (int)data->results.count;
+            LeaveCriticalSection(&data->searchInputMutex);
+
+            ListView_SetItemCount(data->listView, count);
+            if (count > 0) {
+                ListView_RedrawItems(data->listView, 0, count - 1);
+            }
+            InvalidateRect(data->listView, NULL, FALSE);
+            UpdateWindow(data->listView);
+
+            if (IsWindow(GetParent(data->hWnd))) {
+                PostMessageW(GetParent(data->hWnd), WM_SEARCH_RESULTS_CHANGED, 0, 0);
+            }
+            return 0;
+        }
         case WM_CREATE: {
             data = (SearchViewData*)malloc(sizeof(SearchViewData));
             if (!data) return -1;
@@ -392,6 +486,17 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
             data->viewMode = ID_VIEW_DETAILS;
             data->columnMask = COL_DEFAULT;
             DYNARRAY_INIT(data->results);
+
+            InitializeCriticalSection(&data->searchInputMutex);
+            data->hSearchEvent = CreateEventW(NULL, TRUE, FALSE, NULL); // manual reset
+            data->pendingQuery = NULL;
+            data->cancelSearch = 0;
+            data->isSearching = 0;
+            data->isTerminating = false;
+            StringMatcher_Init(&data->highlightMatcher);
+
+            // Spawn background search thread
+            data->hSearchThread = (HANDLE)_beginthreadex(NULL, 0, SearchThreadProc, data, 0, NULL);
 
             CREATESTRUCTW* pcs = (CREATESTRUCTW*)lParam;
             data->searchEngine = (SearchEngine*)pcs->lpCreateParams;
@@ -531,9 +636,9 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
             WORD code = HIWORD(wParam);
 
             if (id == IDC_SEARCH_EDIT && code == EN_CHANGE) {
-                // Typings debounce/throttle: 100ms
+                // Typings debounce/throttle: 40ms
                 KillTimer(hWnd, 1);
-                SetTimer(hWnd, 1, 100, NULL);
+                SetTimer(hWnd, 1, 40, NULL);
             }
             else if ((id == IDC_VOLUME_COMBO || id == IDC_FILTER_COMBO) && code == CBN_SELCHANGE) {
                 RunSearchInternal(data);
@@ -788,7 +893,8 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     bool* highlighted = (bool*)calloc(nameLen + 1, sizeof(bool));
 
                                     if (nameLower && highlighted) {
-                                        const StringMatcher* matcher = &data->searchEngine->lastMatcher;
+                                        EnterCriticalSection(&data->searchInputMutex);
+                                        const StringMatcher* matcher = &data->highlightMatcher;
                                         for (int w = 0; w < matcher->wordsCount; w++) {
                                             const wchar_t* wL = matcher->wordsLower[w];
                                             size_t wLen = wcslen(wL);
@@ -803,6 +909,7 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                                 p = wcsstr(p + 1, wL);
                                             }
                                         }
+                                        LeaveCriticalSection(&data->searchInputMutex);
                                     }
 
                                     // Print highlighted segments
@@ -947,11 +1054,28 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
         }
         case WM_DESTROY: {
             if (data) {
+                // Signal search thread to exit safely
+                data->isTerminating = true;
+                InterlockedExchange(&data->cancelSearch, 1);
+                SetEvent(data->hSearchEvent);
+
+                if (data->hSearchThread) {
+                    WaitForSingleObject(data->hSearchThread, 2000);
+                    CloseHandle(data->hSearchThread);
+                }
+                if (data->hSearchEvent) {
+                    CloseHandle(data->hSearchEvent);
+                }
+
+                DeleteCriticalSection(&data->searchInputMutex);
+                if (data->pendingQuery) free(data->pendingQuery);
+
                 // Restore subclasses
                 SetWindowLongPtr(data->searchEdit, GWLP_WNDPROC, (LONG_PTR)data->oldEditWndProc);
                 SetWindowLongPtr(data->listView, GWLP_WNDPROC, (LONG_PTR)data->oldListWndProc);
 
                 DYNARRAY_FREE(data->results);
+                StringMatcher_Free(&data->highlightMatcher);
                 free(data);
                 SetWindowLongPtr(hWnd, GWLP_USERDATA, 0);
             }

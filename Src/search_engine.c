@@ -13,7 +13,7 @@ SearchEngine* SearchEngine_Create(void) {
     engine->notifyWindow = NULL;
     engine->matchPath = false;
     StringMatcher_Init(&engine->lastMatcher);
-    InitializeCriticalSection(&engine->searchMutex);
+    InitializeSRWLock(&engine->drivesLock);
 
     return engine;
 }
@@ -21,27 +21,26 @@ SearchEngine* SearchEngine_Create(void) {
 void SearchEngine_Destroy(SearchEngine* engine) {
     if (!engine) return;
 
-    EnterCriticalSection(&engine->searchMutex);
+    AcquireSRWLockExclusive(&engine->drivesLock);
     for (int i = 0; i < engine->drivesCount; i++) {
         UsnJournalMonitor_Stop(engine->drives[i].Monitor);
         UsnJournalMonitor_Destroy(engine->drives[i].Monitor);
         NtfsIndex_Destroy(engine->drives[i].Index);
     }
     engine->drivesCount = 0;
-    LeaveCriticalSection(&engine->searchMutex);
+    ReleaseSRWLockExclusive(&engine->drivesLock);
 
-    DeleteCriticalSection(&engine->searchMutex);
     StringMatcher_Free(&engine->lastMatcher);
     free(engine);
 }
 
 void SearchEngine_RegisterNotifyWindow(SearchEngine* engine, HWND hwnd) {
-    EnterCriticalSection(&engine->searchMutex);
+    AcquireSRWLockExclusive(&engine->drivesLock);
     engine->notifyWindow = hwnd;
     for (int i = 0; i < engine->drivesCount; i++) {
         UsnJournalMonitor_RegisterNotifyWindow(engine->drives[i].Monitor, hwnd);
     }
-    LeaveCriticalSection(&engine->searchMutex);
+    ReleaseSRWLockExclusive(&engine->drivesLock);
 }
 
 // Category filter extensions helper
@@ -199,7 +198,7 @@ static unsigned int __stdcall IndexerThreadProc(void* arg) {
 }
 
 void SearchEngine_InitializeDrives(SearchEngine* engine, IIndexProgressCallback callback) {
-    EnterCriticalSection(&engine->searchMutex);
+    AcquireSRWLockExclusive(&engine->drivesLock);
 
     DWORD mask = GetLogicalDrives();
     wchar_t activeDrives[26];
@@ -303,16 +302,21 @@ void SearchEngine_InitializeDrives(SearchEngine* engine, IIndexProgressCallback 
         }
     }
 
-    LeaveCriticalSection(&engine->searchMutex);
+    ReleaseSRWLockExclusive(&engine->drivesLock);
 }
 
-void SearchEngine_ExecuteSearch(SearchEngine* engine, const wchar_t* query, MatchMode mode, wchar_t driveFilter, 
-                                 FilterType filter, SearchResultList* outResults) {
-    EnterCriticalSection(&engine->searchMutex);
+bool SearchEngine_ExecuteSearch(SearchEngine* engine, const StringMatcher* matcher, wchar_t driveFilter, 
+                                 FilterType filter, SearchResultList* outResults, volatile LONG* pCancelFlag) {
+    AcquireSRWLockShared(&engine->drivesLock);
 
-    StringMatcher_SetPattern(&engine->lastMatcher, query, mode, false);
+    if (pCancelFlag && InterlockedOr(pCancelFlag, 0)) {
+        ReleaseSRWLockShared(&engine->drivesLock);
+        return false;
+    }
 
-    DYNARRAY_CLEAR(*outResults);
+    // Accumulate results in a temporary buffer (double-buffering)
+    SearchResultList tempResults;
+    DYNARRAY_INIT(tempResults);
 
     for (int d = 0; d < engine->drivesCount; d++) {
         NtfsIndex* pIndex = engine->drives[d].Index;
@@ -329,6 +333,13 @@ void SearchEngine_ExecuteSearch(SearchEngine* engine, const wchar_t* query, Matc
 
         if (records) {
             for (size_t i = 0; i < count; i++) {
+                // Cooperative cancel check every 4096 records to keep preemption extremely responsive
+                if ((i & 4095) == 0 && pCancelFlag && InterlockedOr(pCancelFlag, 0)) {
+                    DYNARRAY_FREE(tempResults);
+                    NtfsIndex_UnlockShared(pIndex);
+                    ReleaseSRWLockShared(&engine->drivesLock);
+                    return false;
+                }
                 const FileRecord* item = records[i];
 
                 if (!item || !item->Name || item->Name[0] == L'\0' || item->ParentFrs == 0xFFFFFFFF) {
@@ -344,9 +355,9 @@ void SearchEngine_ExecuteSearch(SearchEngine* engine, const wchar_t* query, Matc
                     // Match Path: Resolve full canonical path in zero-allocations stack buffer in O(1)
                     wchar_t fullPath[MAX_PATH];
                     NtfsIndex_ResolveFullPathToBuf(pIndex, item, fullPath, MAX_PATH);
-                    matched = StringMatcher_Matches(&engine->lastMatcher, fullPath);
+                    matched = StringMatcher_Matches(matcher, fullPath);
                 } else {
-                    matched = StringMatcher_Matches(&engine->lastMatcher, item->Name);
+                    matched = StringMatcher_Matches(matcher, item->Name);
                 }
 
                 if (matched) {
@@ -362,7 +373,7 @@ void SearchEngine_ExecuteSearch(SearchEngine* engine, const wchar_t* query, Matc
                     res.DateAccessed = item->DateAccessed;
                     res.Attributes = item->Attributes;
                     res.IsDirectory = item->IsDirectory;
-                    DYNARRAY_ADD(*outResults, res);
+                    DYNARRAY_ADD(tempResults, res);
                 }
             }
         }
@@ -370,14 +381,21 @@ void SearchEngine_ExecuteSearch(SearchEngine* engine, const wchar_t* query, Matc
         NtfsIndex_UnlockShared(pIndex);
     }
 
-    LeaveCriticalSection(&engine->searchMutex);
+    // Success! Swap tempResults into outResults
+    DYNARRAY_FREE(*outResults);
+    outResults->data = tempResults.data;
+    outResults->count = tempResults.count;
+    outResults->capacity = tempResults.capacity;
+
+    ReleaseSRWLockShared(&engine->drivesLock);
+    return true;
 }
 
 size_t SearchEngine_GetResultFullPath(const SearchEngine* engine, const SearchResult* result, wchar_t* outBuf, size_t maxChars) {
     size_t written = 0;
     
-    // Acquire mutex for drive list safety
-    EnterCriticalSection((LPCRITICAL_SECTION)&engine->searchMutex);
+    // Acquire SRWLock shared for drive list safety
+    AcquireSRWLockShared((PSRWLOCK)&engine->drivesLock);
     for (int i = 0; i < engine->drivesCount; i++) {
         if (engine->drives[i].Index->driveLetter == result->Drive) {
             NtfsIndex_LockShared(engine->drives[i].Index);
@@ -386,25 +404,25 @@ size_t SearchEngine_GetResultFullPath(const SearchEngine* engine, const SearchRe
             break;
         }
     }
-    LeaveCriticalSection((LPCRITICAL_SECTION)&engine->searchMutex);
+    ReleaseSRWLockShared((PSRWLOCK)&engine->drivesLock);
 
     return written;
 }
 
 void SearchEngine_LockDrivesShared(const SearchEngine* engine) {
-    EnterCriticalSection((LPCRITICAL_SECTION)&engine->searchMutex);
+    AcquireSRWLockShared((PSRWLOCK)&engine->drivesLock);
     for (int i = 0; i < engine->drivesCount; i++) {
         NtfsIndex_LockShared(engine->drives[i].Index);
     }
-    LeaveCriticalSection((LPCRITICAL_SECTION)&engine->searchMutex);
+    ReleaseSRWLockShared((PSRWLOCK)&engine->drivesLock);
 }
 
 void SearchEngine_UnlockDrivesShared(const SearchEngine* engine) {
-    EnterCriticalSection((LPCRITICAL_SECTION)&engine->searchMutex);
+    AcquireSRWLockShared((PSRWLOCK)&engine->drivesLock);
     for (int i = 0; i < engine->drivesCount; i++) {
         NtfsIndex_UnlockShared(engine->drives[i].Index);
     }
-    LeaveCriticalSection((LPCRITICAL_SECTION)&engine->searchMutex);
+    ReleaseSRWLockShared((PSRWLOCK)&engine->drivesLock);
 }
 
 const FileRecord* SearchEngine_GetRecordUnsafe(const SearchEngine* engine, wchar_t driveLetter, unsigned int recordIndex) {
@@ -420,7 +438,7 @@ const FileRecord* SearchEngine_GetRecordUnsafe(const SearchEngine* engine, wchar
 }
 
 void SearchEngine_RemoveDrive(SearchEngine* engine, wchar_t driveLetter) {
-    EnterCriticalSection(&engine->searchMutex);
+    AcquireSRWLockExclusive(&engine->drivesLock);
     for (int i = 0; i < engine->drivesCount; i++) {
         if (engine->drives[i].Index->driveLetter == driveLetter) {
             UsnJournalMonitor_Stop(engine->drives[i].Monitor);
@@ -434,26 +452,26 @@ void SearchEngine_RemoveDrive(SearchEngine* engine, wchar_t driveLetter) {
             break;
         }
     }
-    LeaveCriticalSection(&engine->searchMutex);
+    ReleaseSRWLockExclusive(&engine->drivesLock);
 }
 
 size_t SearchEngine_GetTotalIndexedFiles(const SearchEngine* engine) {
-    EnterCriticalSection((LPCRITICAL_SECTION)&engine->searchMutex);
+    AcquireSRWLockShared((PSRWLOCK)&engine->drivesLock);
     size_t total = 0;
     for (int i = 0; i < engine->drivesCount; i++) {
         total += engine->drives[i].Index->totalFiles;
         total += engine->drives[i].Index->totalFolders;
     }
-    LeaveCriticalSection((LPCRITICAL_SECTION)&engine->searchMutex);
+    ReleaseSRWLockShared((PSRWLOCK)&engine->drivesLock);
     return total;
 }
 
 int SearchEngine_GetIndexedDrives(const SearchEngine* engine, wchar_t* outDrives, int maxDrives) {
-    EnterCriticalSection((LPCRITICAL_SECTION)&engine->searchMutex);
+    AcquireSRWLockShared((PSRWLOCK)&engine->drivesLock);
     int count = engine->drivesCount < maxDrives ? engine->drivesCount : maxDrives;
     for (int i = 0; i < count; i++) {
         outDrives[i] = engine->drives[i].Index->driveLetter;
     }
-    LeaveCriticalSection((LPCRITICAL_SECTION)&engine->searchMutex);
+    ReleaseSRWLockShared((PSRWLOCK)&engine->drivesLock);
     return count;
 }

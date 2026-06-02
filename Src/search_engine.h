@@ -54,7 +54,7 @@ typedef struct {
 typedef struct {
     DriveContext drives[MAX_INDEXED_DRIVES];
     int drivesCount;
-    CRITICAL_SECTION searchMutex;          // Thread lock protecting the context lists
+    SRWLOCK drivesLock;                    // Slim Reader/Writer Lock protecting the context lists
     StringMatcher lastMatcher;             // Caches active search patterns
     HWND notifyWindow;                     // Notification target window
     bool matchPath;                        // Toggles full path matching
@@ -67,8 +67,8 @@ void SearchEngine_Destroy(SearchEngine* engine);
 void SearchEngine_InitializeDrives(SearchEngine* engine, IIndexProgressCallback callback);
 
 // Search executor
-void SearchEngine_ExecuteSearch(SearchEngine* engine, const wchar_t* query, MatchMode mode, wchar_t driveFilter, 
-                                 FilterType filter, SearchResultList* outResults);
+bool SearchEngine_ExecuteSearch(SearchEngine* engine, const StringMatcher* matcher, wchar_t driveFilter, 
+                                 FilterType filter, SearchResultList* outResults, volatile LONG* pCancelFlag);
 
 // Zero-allocation full path resolver
 size_t SearchEngine_GetResultFullPath(const SearchEngine* engine, const SearchResult* result, wchar_t* outBuf, size_t maxChars);
