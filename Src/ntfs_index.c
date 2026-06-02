@@ -1,16 +1,68 @@
 #include "ntfs_index.h"
 
+#define ARENA_PAGE_SIZE (4 * 1024 * 1024) // 4MB pages
+
+static FileRecord* NtfsIndex_ArenaAlloc(NtfsIndex* index, size_t size) {
+    // Align size to 8-byte boundary
+    size = (size + 7) & ~7;
+    
+    ArenaPage* page = index->arenaPages;
+    if (!page || page->Used + size > ARENA_PAGE_SIZE) {
+        size_t allocSize = sizeof(ArenaPage) + ARENA_PAGE_SIZE;
+        ArenaPage* newPage = (ArenaPage*)malloc(allocSize);
+        if (!newPage) return NULL;
+        newPage->Used = 0;
+        newPage->Next = index->arenaPages;
+        index->arenaPages = newPage;
+        page = newPage;
+    }
+    
+    FileRecord* rec = (FileRecord*)(page->Data + page->Used);
+    page->Used += size;
+    return rec;
+}
+
+static void NtfsIndex_ArenaFreeAll(NtfsIndex* index) {
+    ArenaPage* page = index->arenaPages;
+    while (page) {
+        ArenaPage* next = page->Next;
+        free(page);
+        page = next;
+    }
+    index->arenaPages = NULL;
+}
+
+static void NtfsIndex_AddHardLink(NtfsIndex* index, unsigned int frs, FileRecord* rec) {
+    if (index->hardLinksCount >= index->hardLinksCapacity) {
+        size_t newCap = index->hardLinksCapacity == 0 ? 32 : index->hardLinksCapacity * 2;
+        HardLinkEntry* newLinks = (HardLinkEntry*)realloc(index->hardLinks, newCap * sizeof(HardLinkEntry));
+        if (newLinks) {
+            index->hardLinks = newLinks;
+            index->hardLinksCapacity = newCap;
+        }
+    }
+    if (index->hardLinksCount < index->hardLinksCapacity) {
+        index->hardLinks[index->hardLinksCount].Frs = frs;
+        index->hardLinks[index->hardLinksCount].Record = rec;
+        index->hardLinksCount++;
+    }
+}
+
 // Lifecycle management
 NtfsIndex* NtfsIndex_Create(wchar_t driveLetter) {
     NtfsIndex* index = (NtfsIndex*)malloc(sizeof(NtfsIndex));
     if (!index) return NULL;
 
     index->driveLetter = driveLetter;
-    index->recordsByFrs = NULL;
+    index->recordsByFrsPages = NULL;
     index->recordsCount = 0;
     index->activeRecords = NULL;
     index->activeCount = 0;
     index->activeCapacity = 0;
+    index->arenaPages = NULL;
+    index->hardLinks = NULL;
+    index->hardLinksCount = 0;
+    index->hardLinksCapacity = 0;
     index->totalFiles = 0;
     index->totalFolders = 0;
     index->isIndexed = false;
@@ -23,28 +75,32 @@ void NtfsIndex_Destroy(NtfsIndex* index) {
     if (!index) return;
     
     NtfsIndex_LockExclusive(index);
-    if (index->recordsByFrs) {
-        for (size_t i = 0; i < index->recordsCount; i++) {
-            FileRecord* rec = index->recordsByFrs[i];
-            while (rec) {
-                FileRecord* next = rec->Next;
-                if (rec->Name) {
-                    free(rec->Name);
-                }
-                free(rec);
-                rec = next;
+    if (index->recordsByFrsPages) {
+        size_t pagesCount = (index->recordsCount + FRS_PAGE_SIZE - 1) >> FRS_PAGE_SHIFT;
+        for (size_t p = 0; p < pagesCount; p++) {
+            FileRecord** page = index->recordsByFrsPages[p];
+            if (page) {
+                free(page);
             }
         }
-        free(index->recordsByFrs);
+        free(index->recordsByFrsPages);
     }
     if (index->activeRecords) {
         free(index->activeRecords);
     }
-    index->recordsByFrs = NULL;
+    if (index->hardLinks) {
+        free(index->hardLinks);
+    }
+    NtfsIndex_ArenaFreeAll(index);
+
+    index->recordsByFrsPages = NULL;
     index->activeRecords = NULL;
+    index->hardLinks = NULL;
     index->recordsCount = 0;
     index->activeCount = 0;
     index->activeCapacity = 0;
+    index->hardLinksCount = 0;
+    index->hardLinksCapacity = 0;
     
     NtfsIndex_UnlockExclusive(index);
     free(index);
@@ -69,21 +125,26 @@ void NtfsIndex_UnlockExclusive(NtfsIndex* index) {
 void NtfsIndex_InitializeSize(NtfsIndex* index, size_t maxFrsCount) {
     NtfsIndex_LockExclusive(index);
     
-    if (index->recordsByFrs) {
-        for (size_t i = 0; i < index->recordsCount; i++) {
-            FileRecord* rec = index->recordsByFrs[i];
-            while (rec) {
-                FileRecord* next = rec->Next;
-                if (rec->Name) free(rec->Name);
-                free(rec);
-                rec = next;
+    if (index->recordsByFrsPages) {
+        size_t pagesCount = (index->recordsCount + FRS_PAGE_SIZE - 1) >> FRS_PAGE_SHIFT;
+        for (size_t p = 0; p < pagesCount; p++) {
+            FileRecord** page = index->recordsByFrsPages[p];
+            if (page) {
+                free(page);
             }
         }
-        free(index->recordsByFrs);
+        free(index->recordsByFrsPages);
+        index->recordsByFrsPages = NULL;
     }
-    
+    if (index->hardLinks) {
+        free(index->hardLinks);
+        index->hardLinks = NULL;
+    }
+    NtfsIndex_ArenaFreeAll(index);
+
     index->recordsCount = maxFrsCount;
-    index->recordsByFrs = (FileRecord**)calloc(maxFrsCount, sizeof(FileRecord*));
+    size_t pagesCount = (maxFrsCount + FRS_PAGE_SIZE - 1) >> FRS_PAGE_SHIFT;
+    index->recordsByFrsPages = (FileRecord***)calloc(pagesCount, sizeof(FileRecord**));
     
     if (index->activeRecords) {
         free(index->activeRecords);
@@ -91,25 +152,24 @@ void NtfsIndex_InitializeSize(NtfsIndex* index, size_t maxFrsCount) {
     }
     index->activeCount = 0;
     index->activeCapacity = 0;
+    index->hardLinksCount = 0;
+    index->hardLinksCapacity = 0;
     index->totalFiles = 0;
     index->totalFolders = 0;
     index->isIndexed = false;
     
     // Setup NTFS Root Directory (FRS 5) representation
     if (5 < index->recordsCount) {
-        index->recordsByFrs[5] = (FileRecord*)malloc(sizeof(FileRecord));
-        if (index->recordsByFrs[5]) {
-            index->recordsByFrs[5]->Name = _wcsdup(L"");
-            index->recordsByFrs[5]->Frs = 5;
-            index->recordsByFrs[5]->ParentFrs = 5;
-            index->recordsByFrs[5]->IsDirectory = true;
-            index->recordsByFrs[5]->Size = 0;
-            index->recordsByFrs[5]->SizeOnDisk = 0;
-            index->recordsByFrs[5]->DateCreated = 0;
-            index->recordsByFrs[5]->DateModified = 0;
-            index->recordsByFrs[5]->DateAccessed = 0;
-            index->recordsByFrs[5]->Attributes = FILE_ATTRIBUTE_DIRECTORY;
-            index->recordsByFrs[5]->Next = NULL;
+        FileRecord* root = NtfsIndex_ArenaAlloc(index, sizeof(FileRecord) + sizeof(wchar_t));
+        if (root) {
+            root->Name[0] = L'\0';
+            root->Frs = 5;
+            root->ParentFrs = 5;
+            root->Size = 0;
+            root->DateModified = 0;
+            root->Attributes = FILE_ATTRIBUTE_DIRECTORY;
+            
+            NtfsIndex_SetRecord(index, 5, root);
             index->totalFolders = 1;
         }
     }
@@ -228,12 +288,17 @@ void NtfsIndex_ProcessMftChunk(NtfsIndex* index, unsigned char* chunkBuffer, siz
     unsigned int numRecords = (unsigned int)(chunkSize / recordSize);
     if (startFrs + numRecords > index->recordsCount) {
         size_t new_size = startFrs + numRecords + 4096;
-        FileRecord** grown = (FileRecord**)realloc(index->recordsByFrs, new_size * sizeof(FileRecord*));
-        if (grown) {
-            memset(grown + index->recordsCount, 0, (new_size - index->recordsCount) * sizeof(FileRecord*));
-            index->recordsByFrs = grown;
-            index->recordsCount = new_size;
+        size_t oldPagesCount = (index->recordsCount + FRS_PAGE_SIZE - 1) >> FRS_PAGE_SHIFT;
+        size_t newPagesCount = (new_size + FRS_PAGE_SIZE - 1) >> FRS_PAGE_SHIFT;
+        
+        if (newPagesCount > oldPagesCount) {
+            FileRecord*** grown = (FileRecord***)realloc(index->recordsByFrsPages, newPagesCount * sizeof(FileRecord**));
+            if (grown) {
+                memset(grown + oldPagesCount, 0, (newPagesCount - oldPagesCount) * sizeof(FileRecord**));
+                index->recordsByFrsPages = grown;
+            }
         }
+        index->recordsCount = new_size;
     }
     
     for (unsigned int i = 0; i < numRecords; ++i) {
@@ -306,16 +371,12 @@ void NtfsIndex_ProcessMftChunk(NtfsIndex* index, unsigned char* chunkBuffer, siz
             attr = (A_RECORD_HEADER*)((unsigned char*)attr + attr->Length);
         }
         
-        // Clean old records first if any exist
-        if (index->recordsByFrs[frsIndex]) {
-            FileRecord* rec = index->recordsByFrs[frsIndex];
-            while (rec) {
-                FileRecord* next = rec->Next;
-                if (rec->Name) free(rec->Name);
-                free(rec);
-                rec = next;
-            }
-            index->recordsByFrs[frsIndex] = NULL;
+        // Clean old records first if any exist (though rare in initial index, handled for safety)
+        FileRecord* oldRec = NtfsIndex_GetRecord(index, frsIndex);
+        if (oldRec) {
+            // Note: Since we are using the Arena Allocator, we cannot free individual FileRecords.
+            // But we remove them from the sparse table to keep the index correct.
+            NtfsIndex_SetRecord(index, frsIndex, NULL);
         }
         
         // Allocate and link records
@@ -323,26 +384,23 @@ void NtfsIndex_ProcessMftChunk(NtfsIndex* index, unsigned char* chunkBuffer, siz
             for (int k = 0; k < fnInfosCount; ++k) {
                 const FN_INFORMATION* fnInfo = fnInfos[k];
                 if (fnInfo->FileNameLength > 0 && fnInfo->FileNameLength < 260) {
-                    FileRecord* item = (FileRecord*)malloc(sizeof(FileRecord));
+                    size_t nameLen = fnInfo->FileNameLength;
+                    FileRecord* item = NtfsIndex_ArenaAlloc(index, sizeof(FileRecord) + (nameLen + 1) * sizeof(wchar_t));
                     if (item) {
-                        item->IsDirectory = isDirectory;
-                        item->Name = (wchar_t*)malloc((fnInfo->FileNameLength + 1) * sizeof(wchar_t));
-                        if (item->Name) {
-                            wcsncpy_s(item->Name, fnInfo->FileNameLength + 1, fnInfo->FileName, fnInfo->FileNameLength);
-                            item->Name[fnInfo->FileNameLength] = L'\0';
-                        }
+                        wcsncpy_s(item->Name, nameLen + 1, fnInfo->FileName, nameLen);
+                        item->Name[nameLen] = L'\0';
                         item->Frs = frsIndex;
                         item->ParentFrs = (unsigned int)(fnInfo->ParentDirectory & 0x0000FFFFFFFFFFFFLL);
-                        item->DateCreated = dateCreated;
                         item->DateModified = dateModified;
-                        item->DateAccessed = dateAccessed;
                         item->Attributes = attributes;
                         item->Size = size;
-                        item->SizeOnDisk = sizeOnDisk;
                         
-                        // Link as head
-                        item->Next = index->recordsByFrs[frsIndex];
-                        index->recordsByFrs[frsIndex] = item;
+                        FileRecord* existing = NtfsIndex_GetRecord(index, frsIndex);
+                        if (!existing) {
+                            NtfsIndex_SetRecord(index, frsIndex, item);
+                        } else {
+                            NtfsIndex_AddHardLink(index, frsIndex, item);
+                        }
                         
                         if (isDirectory) index->totalFolders++;
                         else index->totalFiles++;
@@ -353,26 +411,23 @@ void NtfsIndex_ProcessMftChunk(NtfsIndex* index, unsigned char* chunkBuffer, siz
         else if (dosFnInfo != NULL) {
             const FN_INFORMATION* fnInfo = dosFnInfo;
             if (fnInfo->FileNameLength > 0 && fnInfo->FileNameLength < 260) {
-                FileRecord* item = (FileRecord*)malloc(sizeof(FileRecord));
+                size_t nameLen = fnInfo->FileNameLength;
+                FileRecord* item = NtfsIndex_ArenaAlloc(index, sizeof(FileRecord) + (nameLen + 1) * sizeof(wchar_t));
                 if (item) {
-                    item->IsDirectory = isDirectory;
-                    item->Name = (wchar_t*)malloc((fnInfo->FileNameLength + 1) * sizeof(wchar_t));
-                    if (item->Name) {
-                        wcsncpy_s(item->Name, fnInfo->FileNameLength + 1, fnInfo->FileName, fnInfo->FileNameLength);
-                        item->Name[fnInfo->FileNameLength] = L'\0';
-                    }
+                    wcsncpy_s(item->Name, nameLen + 1, fnInfo->FileName, nameLen);
+                    item->Name[nameLen] = L'\0';
                     item->Frs = frsIndex;
                     item->ParentFrs = (unsigned int)(fnInfo->ParentDirectory & 0x0000FFFFFFFFFFFFLL);
-                    item->DateCreated = dateCreated;
                     item->DateModified = dateModified;
-                    item->DateAccessed = dateAccessed;
                     item->Attributes = attributes;
                     item->Size = size;
-                    item->SizeOnDisk = sizeOnDisk;
                     
-                    // Link as head
-                    item->Next = index->recordsByFrs[frsIndex];
-                    index->recordsByFrs[frsIndex] = item;
+                    FileRecord* existing = NtfsIndex_GetRecord(index, frsIndex);
+                    if (!existing) {
+                        NtfsIndex_SetRecord(index, frsIndex, item);
+                    } else {
+                        NtfsIndex_AddHardLink(index, frsIndex, item);
+                    }
                     
                     if (isDirectory) index->totalFolders++;
                     else index->totalFiles++;
@@ -409,15 +464,28 @@ void NtfsIndex_FinalizeIndex(NtfsIndex* index) {
         index->activeRecords = (FileRecord**)malloc(index->activeCapacity * sizeof(FileRecord*));
         
         if (index->activeRecords) {
-            for (size_t i = 0; i < index->recordsCount; i++) {
-                FileRecord* rec = index->recordsByFrs[i];
-                while (rec) {
-                    if (rec->Name && rec->Name[0] != L'\0') {
-                        if (index->activeCount < index->activeCapacity) {
-                            index->activeRecords[index->activeCount++] = rec;
+            size_t pagesCount = (index->recordsCount + FRS_PAGE_SIZE - 1) >> FRS_PAGE_SHIFT;
+            for (size_t p = 0; p < pagesCount; p++) {
+                FileRecord** page = index->recordsByFrsPages[p];
+                if (page) {
+                    for (int i = 0; i < FRS_PAGE_SIZE; i++) {
+                        FileRecord* rec = page[i];
+                        if (rec && rec->Name && rec->Name[0] != L'\0') {
+                            if (index->activeCount < index->activeCapacity) {
+                                index->activeRecords[index->activeCount++] = rec;
+                            }
                         }
                     }
-                    rec = rec->Next;
+                }
+            }
+            
+            // Add all hard link records
+            for (size_t h = 0; h < index->hardLinksCount; h++) {
+                FileRecord* rec = index->hardLinks[h].Record;
+                if (rec && rec->Name && rec->Name[0] != L'\0') {
+                    if (index->activeCount < index->activeCapacity) {
+                        index->activeRecords[index->activeCount++] = rec;
+                    }
                 }
             }
             
@@ -445,7 +513,7 @@ size_t NtfsIndex_ResolveFullPathToBuf(const NtfsIndex* index, const FileRecord* 
     
     // Walk up the parent tree recursively to root FRS (5 or 0)
     while (current < index->recordsCount && current != 5 && current != 0 && depth < 256) {
-        const FileRecord* pRec = index->recordsByFrs[current];
+        const FileRecord* pRec = NtfsIndex_GetRecord(index, current);
         if (!pRec || !pRec->Name || pRec->Name[0] == L'\0') {
             break;
         }
@@ -487,7 +555,7 @@ size_t NtfsIndex_ResolveFullPathToBufByFrs(const NtfsIndex* index, unsigned int 
         if (maxChars > 0) outBuf[0] = L'\0';
         return 0;
     }
-    return NtfsIndex_ResolveFullPathToBuf(index, index->recordsByFrs[recordIndex], outBuf, maxChars);
+    return NtfsIndex_ResolveFullPathToBuf(index, NtfsIndex_GetRecord(index, recordIndex), outBuf, maxChars);
 }
 
 size_t NtfsIndex_ResolveFullPathFromParent(const NtfsIndex* index, unsigned int parentFrs, const wchar_t* name, wchar_t* outBuf, size_t maxChars) {
@@ -520,7 +588,7 @@ size_t NtfsIndex_ResolveFullPathFromParent(const NtfsIndex* index, unsigned int 
     
     // Walk up the parent tree recursively to root FRS (5 or 0)
     while (current < index->recordsCount && current != 5 && current != 0 && depth < 256) {
-        const FileRecord* pRec = index->recordsByFrs[current];
+        const FileRecord* pRec = NtfsIndex_GetRecord(index, current);
         if (!pRec || !pRec->Name || pRec->Name[0] == L'\0') {
             break;
         }
@@ -614,19 +682,22 @@ void NtfsIndex_AddOrUpdateRecord(NtfsIndex* index, unsigned int recordIndex, con
     
     if (recordIndex >= index->recordsCount) {
         size_t new_size = recordIndex + 4096;
-        FileRecord** grown = (FileRecord**)realloc(index->recordsByFrs, new_size * sizeof(FileRecord*));
-        if (grown) {
-            memset(grown + index->recordsCount, 0, (new_size - index->recordsCount) * sizeof(FileRecord*));
-            index->recordsByFrs = grown;
-            index->recordsCount = new_size;
+        size_t oldPagesCount = (index->recordsCount + FRS_PAGE_SIZE - 1) >> FRS_PAGE_SHIFT;
+        size_t newPagesCount = (new_size + FRS_PAGE_SIZE - 1) >> FRS_PAGE_SHIFT;
+        
+        if (newPagesCount > oldPagesCount) {
+            FileRecord*** grown = (FileRecord***)realloc(index->recordsByFrsPages, newPagesCount * sizeof(FileRecord**));
+            if (grown) {
+                memset(grown + oldPagesCount, 0, (newPagesCount - oldPagesCount) * sizeof(FileRecord**));
+                index->recordsByFrsPages = grown;
+            }
         }
+        index->recordsCount = new_size;
     }
     
-    // Clean old records first to avoid duplicates or memory leaks
-    FileRecord* oldRec = index->recordsByFrs[recordIndex];
-    while (oldRec) {
-        FileRecord* next = oldRec->Next;
-        
+    // Clean old records first to avoid duplicates
+    FileRecord* oldRec = NtfsIndex_GetRecord(index, recordIndex);
+    if (oldRec) {
         int exact = 0;
         int actIdx = FindActiveRecordIndex(index->activeRecords, index->activeCount, oldRec, &exact);
         if (exact && actIdx >= 0 && actIdx < (int)index->activeCount) {
@@ -634,34 +705,53 @@ void NtfsIndex_AddOrUpdateRecord(NtfsIndex* index, unsigned int recordIndex, con
             index->activeCount--;
         }
         
-        if (oldRec->IsDirectory) index->totalFolders--;
+        if (oldRec->Attributes & FILE_ATTRIBUTE_DIRECTORY) index->totalFolders--;
         else index->totalFiles--;
         
-        if (oldRec->Name) free(oldRec->Name);
-        free(oldRec);
-        
-        oldRec = next;
+        NtfsIndex_SetRecord(index, recordIndex, NULL);
     }
-    index->recordsByFrs[recordIndex] = NULL;
+    
+    // Also remove any hard links associated with this FRS index
+    for (size_t i = 0; i < index->hardLinksCount; ) {
+        if (index->hardLinks[i].Frs == recordIndex) {
+            FileRecord* hlRec = index->hardLinks[i].Record;
+            int exact = 0;
+            int actIdx = FindActiveRecordIndex(index->activeRecords, index->activeCount, hlRec, &exact);
+            if (exact && actIdx >= 0 && actIdx < (int)index->activeCount) {
+                memmove(index->activeRecords + actIdx, index->activeRecords + actIdx + 1, (index->activeCount - actIdx - 1) * sizeof(FileRecord*));
+                index->activeCount--;
+            }
+            if (hlRec->Attributes & FILE_ATTRIBUTE_DIRECTORY) index->totalFolders--;
+            else index->totalFiles--;
+            
+            // Swap-remove from hardLinks array
+            if (i < index->hardLinksCount - 1) {
+                index->hardLinks[i] = index->hardLinks[index->hardLinksCount - 1];
+            }
+            index->hardLinksCount--;
+        } else {
+            i++;
+        }
+    }
     
     // Add the new record
-    FileRecord* item = (FileRecord*)malloc(sizeof(FileRecord));
+    size_t nameLen = name ? wcslen(name) : 0;
+    FileRecord* item = NtfsIndex_ArenaAlloc(index, sizeof(FileRecord) + (nameLen + 1) * sizeof(wchar_t));
     if (item) {
-        item->IsDirectory = isDirectory;
-        item->Name = _wcsdup(name);
+        if (name) {
+            wcscpy_s(item->Name, nameLen + 1, name);
+        } else {
+            item->Name[0] = L'\0';
+        }
         item->Frs = recordIndex;
         item->ParentFrs = parentFrs;
         item->Size = size;
-        item->SizeOnDisk = sizeOnDisk;
-        item->DateCreated = dateCreated;
         item->DateModified = dateModified;
-        item->DateAccessed = dateAccessed;
         item->Attributes = attributes;
-        item->Next = NULL;
         
-        index->recordsByFrs[recordIndex] = item;
+        NtfsIndex_SetRecord(index, recordIndex, item);
         
-        if (isDirectory) index->totalFolders++;
+        if (attributes & FILE_ATTRIBUTE_DIRECTORY) index->totalFolders++;
         else index->totalFiles++;
         
         // Insert into activeRecords
@@ -686,10 +776,8 @@ void NtfsIndex_DeleteRecord(NtfsIndex* index, unsigned int recordIndex) {
     NtfsIndex_LockExclusive(index);
     
     if (recordIndex < index->recordsCount) {
-        FileRecord* rec = index->recordsByFrs[recordIndex];
-        while (rec) {
-            FileRecord* next = rec->Next;
-            
+        FileRecord* rec = NtfsIndex_GetRecord(index, recordIndex);
+        if (rec) {
             // Remove from activeRecords
             int exact = 0;
             int actIdx = FindActiveRecordIndex(index->activeRecords, index->activeCount, rec, &exact);
@@ -698,15 +786,34 @@ void NtfsIndex_DeleteRecord(NtfsIndex* index, unsigned int recordIndex) {
                 index->activeCount--;
             }
             
-            if (rec->IsDirectory) index->totalFolders--;
+            if (rec->Attributes & FILE_ATTRIBUTE_DIRECTORY) index->totalFolders--;
             else index->totalFiles--;
             
-            if (rec->Name) free(rec->Name);
-            free(rec);
-            
-            rec = next;
+            NtfsIndex_SetRecord(index, recordIndex, NULL);
         }
-        index->recordsByFrs[recordIndex] = NULL;
+        
+        // Also delete hard links
+        for (size_t i = 0; i < index->hardLinksCount; ) {
+            if (index->hardLinks[i].Frs == recordIndex) {
+                FileRecord* hlRec = index->hardLinks[i].Record;
+                int exact = 0;
+                int actIdx = FindActiveRecordIndex(index->activeRecords, index->activeCount, hlRec, &exact);
+                if (exact && actIdx >= 0 && actIdx < (int)index->activeCount) {
+                    memmove(index->activeRecords + actIdx, index->activeRecords + actIdx + 1, (index->activeCount - actIdx - 1) * sizeof(FileRecord*));
+                    index->activeCount--;
+                }
+                if (hlRec->Attributes & FILE_ATTRIBUTE_DIRECTORY) index->totalFolders--;
+                else index->totalFiles--;
+                
+                // Swap-remove from hardLinks array
+                if (i < index->hardLinksCount - 1) {
+                    index->hardLinks[i] = index->hardLinks[index->hardLinksCount - 1];
+                }
+                index->hardLinksCount--;
+            } else {
+                i++;
+            }
+        }
     }
     
     NtfsIndex_UnlockExclusive(index);

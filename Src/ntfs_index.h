@@ -5,35 +5,68 @@
 
 // In-memory representation of a single file or directory record
 typedef struct FileRecord {
-    wchar_t* Name;                         // Contiguous string pointer
+    unsigned long long Size;               // File logical size in bytes
+    unsigned long long DateModified;       // File modification date
     unsigned int Frs;                      // Its own FRS record index
     unsigned int ParentFrs;                // Parent folder record reference FRS number
-    unsigned long long Size;               // File logical size in bytes
-    unsigned long long SizeOnDisk;         // File size on disk in bytes
-    unsigned long long DateCreated;
-    unsigned long long DateModified;
-    unsigned long long DateAccessed;
     unsigned int Attributes;               // Win32 file attribute flags
-    bool IsDirectory;
-    struct FileRecord* Next;               // Pointer to the next hard link record
+    wchar_t Name[];                        // Flexible array member for inline name allocation
 } FileRecord;
+
+typedef struct ArenaPage {
+    struct ArenaPage* Next;
+    size_t Used;
+    unsigned char Data[];
+} ArenaPage;
+
+typedef struct {
+    unsigned int Frs;
+    FileRecord* Record;
+} HardLinkEntry;
+
+#define FRS_PAGE_SHIFT 12               // 4096 entries per page
+#define FRS_PAGE_SIZE (1 << FRS_PAGE_SHIFT)
+#define FRS_PAGE_MASK (FRS_PAGE_SIZE - 1)
 
 // The NTFS index structure managing the in-memory records
 typedef struct {
     wchar_t driveLetter;
-    FileRecord** recordsByFrs;             // Sparse lookup array (index = FRS number)
+    FileRecord*** recordsByFrsPages;       // Paged sparse lookup table (2-level page table)
     size_t recordsCount;                   // Total allocated size of the sparse array
     
     FileRecord** activeRecords;            // Contiguous pre-sorted array for ultra-fast scanning
     size_t activeCount;                    // Number of elements currently in the active array
     size_t activeCapacity;                 // Maximum capacity of the active array
     
+    ArenaPage* arenaPages;                 // Page-pool allocator pages list
+    HardLinkEntry* hardLinks;              // Dynamic list of rare hard links
+    size_t hardLinksCount;
+    size_t hardLinksCapacity;
+
     unsigned int totalFiles;
     unsigned int totalFolders;
     bool isIndexed;
     
     SRWLOCK lock;                          // High-concurrency Slim Reader-Writer lock
 } NtfsIndex;
+
+// Fast inline O(1) paged record lookup
+static inline FileRecord* NtfsIndex_GetRecord(const NtfsIndex* index, unsigned int frs) {
+    if (frs >= index->recordsCount || !index->recordsByFrsPages) return NULL;
+    unsigned int pageIdx = frs >> FRS_PAGE_SHIFT;
+    FileRecord** page = index->recordsByFrsPages[pageIdx];
+    if (!page) return NULL;
+    return page[frs & FRS_PAGE_MASK];
+}
+
+static inline void NtfsIndex_SetRecord(NtfsIndex* index, unsigned int frs, FileRecord* rec) {
+    if (frs >= index->recordsCount || !index->recordsByFrsPages) return;
+    unsigned int pageIdx = frs >> FRS_PAGE_SHIFT;
+    if (!index->recordsByFrsPages[pageIdx]) {
+        index->recordsByFrsPages[pageIdx] = (FileRecord**)calloc(FRS_PAGE_SIZE, sizeof(FileRecord*));
+    }
+    index->recordsByFrsPages[pageIdx][frs & FRS_PAGE_MASK] = rec;
+}
 
 // Index lifecycle and concurrency management
 NtfsIndex* NtfsIndex_Create(wchar_t driveLetter);

@@ -346,7 +346,9 @@ bool SearchEngine_ExecuteSearch(SearchEngine* engine, const StringMatcher* match
                     continue;
                 }
 
-                if (!FilePassesFilter(item->Name, item->IsDirectory, filter)) {
+                bool isDir = (item->Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+                if (!FilePassesFilter(item->Name, isDir, filter)) {
                     continue;
                 }
 
@@ -362,17 +364,8 @@ bool SearchEngine_ExecuteSearch(SearchEngine* engine, const StringMatcher* match
 
                 if (matched) {
                     SearchResult res;
+                    res.Record = item;
                     res.Drive = letter;
-                    wcsncpy_s(res.Name, 260, item->Name, _TRUNCATE);
-                    res.Frs = item->Frs;
-                    res.ParentFrs = item->ParentFrs;
-                    res.Size = item->Size;
-                    res.SizeOnDisk = item->SizeOnDisk;
-                    res.DateCreated = item->DateCreated;
-                    res.DateModified = item->DateModified;
-                    res.DateAccessed = item->DateAccessed;
-                    res.Attributes = item->Attributes;
-                    res.IsDirectory = item->IsDirectory;
                     DYNARRAY_ADD(tempResults, res);
                 }
             }
@@ -399,7 +392,7 @@ size_t SearchEngine_GetResultFullPath(const SearchEngine* engine, const SearchRe
     for (int i = 0; i < engine->drivesCount; i++) {
         if (engine->drives[i].Index->driveLetter == result->Drive) {
             NtfsIndex_LockShared(engine->drives[i].Index);
-            written = NtfsIndex_ResolveFullPathFromParent(engine->drives[i].Index, result->ParentFrs, result->Name, outBuf, maxChars);
+            written = NtfsIndex_ResolveFullPathFromParent(engine->drives[i].Index, result->Record->ParentFrs, result->Record->Name, outBuf, maxChars);
             NtfsIndex_UnlockShared(engine->drives[i].Index);
             break;
         }
@@ -429,7 +422,7 @@ const FileRecord* SearchEngine_GetRecordUnsafe(const SearchEngine* engine, wchar
     for (int i = 0; i < engine->drivesCount; i++) {
         if (engine->drives[i].Index->driveLetter == driveLetter) {
             if (recordIndex < engine->drives[i].Index->recordsCount) {
-                return engine->drives[i].Index->recordsByFrs[recordIndex];
+                return NtfsIndex_GetRecord(engine->drives[i].Index, recordIndex);
             }
             break;
         }

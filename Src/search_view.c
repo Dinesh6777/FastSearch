@@ -295,11 +295,11 @@ static int CompareResults(const void* a, const void* b) {
     const SearchResult* resA = (const SearchResult*)a;
     const SearchResult* resB = (const SearchResult*)b;
     SearchViewData* data = g_SortData;
-    if (!data) return 0;
+    if (!data || !resA->Record || !resB->Record) return 0;
 
     // Always keep standard system '$' metadata files at the end
-    bool aStartsWithDollar = (resA->Name[0] == L'$');
-    bool bStartsWithDollar = (resB->Name[0] == L'$');
+    bool aStartsWithDollar = (resA->Record->Name[0] == L'$');
+    bool bStartsWithDollar = (resB->Record->Name[0] == L'$');
     if (aStartsWithDollar != bStartsWithDollar) {
         return aStartsWithDollar ? 1 : -1;
     }
@@ -309,7 +309,7 @@ static int CompareResults(const void* a, const void* b) {
 
     switch (flag) {
         case COL_NAME:
-            res = _wcsicmp(resA->Name, resB->Name);
+            res = _wcsicmp(resA->Record->Name, resB->Record->Name);
             break;
         case COL_PATH: {
             wchar_t pathA[MAX_PATH];
@@ -320,22 +320,22 @@ static int CompareResults(const void* a, const void* b) {
             break;
         }
         case COL_SIZE:
-            res = resA->Size < resB->Size ? -1 : (resA->Size > resB->Size ? 1 : 0);
+        case COL_SIZE_DISK: {
+            unsigned long long sizeA = resA->Record->Size;
+            unsigned long long sizeB = resB->Record->Size;
+            res = sizeA < sizeB ? -1 : (sizeA > sizeB ? 1 : 0);
             break;
-        case COL_SIZE_DISK:
-            res = resA->SizeOnDisk < resB->SizeOnDisk ? -1 : (resA->SizeOnDisk > resB->SizeOnDisk ? 1 : 0);
-            break;
+        }
         case COL_MODIFIED:
-            res = resA->DateModified < resB->DateModified ? -1 : (resA->DateModified > resB->DateModified ? 1 : 0);
-            break;
         case COL_CREATED:
-            res = resA->DateCreated < resB->DateCreated ? -1 : (resA->DateCreated > resB->DateCreated ? 1 : 0);
+        case COL_ACCESSED: {
+            unsigned long long dateA = resA->Record->DateModified;
+            unsigned long long dateB = resB->Record->DateModified;
+            res = dateA < dateB ? -1 : (dateA > dateB ? 1 : 0);
             break;
-        case COL_ACCESSED:
-            res = resA->DateAccessed < resB->DateAccessed ? -1 : (resA->DateAccessed > resB->DateAccessed ? 1 : 0);
-            break;
+        }
         case COL_ATTRIBUTES:
-            res = resA->Attributes < resB->Attributes ? -1 : (resA->Attributes > resB->Attributes ? 1 : 0);
+            res = resA->Record->Attributes < resB->Record->Attributes ? -1 : (resA->Record->Attributes > resB->Record->Attributes ? 1 : 0);
             break;
     }
 
@@ -679,6 +679,9 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                         if (idx < 0 || idx >= (int)data->results.count) return 0;
 
                         const SearchResult* res = &data->results.data[idx];
+                        if (!res->Record) return 0;
+
+                        bool isDir = (res->Record->Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
                         if (pDispInfo->item.mask & LVIF_TEXT) {
                             int subItem = pDispInfo->item.iSubItem;
@@ -688,7 +691,7 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
 
                                 switch (flag) {
                                     case COL_NAME:
-                                        wcsncpy_s(temp, MAX_PATH, res->Name, _TRUNCATE);
+                                        wcsncpy_s(temp, MAX_PATH, res->Record->Name, _TRUNCATE);
                                         break;
                                     case COL_PATH:
                                         SearchEngine_GetResultFullPath(data->searchEngine, res, temp, MAX_PATH);
@@ -697,22 +700,16 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                         if (lastSlash) *lastSlash = L'\0';
                                         break;
                                     case COL_SIZE:
-                                        if (!res->IsDirectory) FormatFileSize(res->Size, temp, MAX_PATH);
-                                        break;
                                     case COL_SIZE_DISK:
-                                        if (!res->IsDirectory) FormatFileSize(res->SizeOnDisk, temp, MAX_PATH);
+                                        if (!isDir) FormatFileSize(res->Record->Size, temp, MAX_PATH);
                                         break;
                                     case COL_MODIFIED:
-                                        FormatFileTime(res->DateModified, temp, MAX_PATH);
-                                        break;
                                     case COL_CREATED:
-                                        FormatFileTime(res->DateCreated, temp, MAX_PATH);
-                                        break;
                                     case COL_ACCESSED:
-                                        FormatFileTime(res->DateAccessed, temp, MAX_PATH);
+                                        FormatFileTime(res->Record->DateModified, temp, MAX_PATH);
                                         break;
                                     case COL_ATTRIBUTES:
-                                        FormatAttributes(res->Attributes, temp, MAX_PATH);
+                                        FormatAttributes(res->Record->Attributes, temp, MAX_PATH);
                                         break;
                                 }
                                 wcsncpy_s(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, temp, _TRUNCATE);
@@ -721,7 +718,7 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
 
                         if (pDispInfo->item.mask & LVIF_IMAGE) {
                             SHFILEINFOW sfiLocal;
-                            DWORD attribs = res->IsDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                            DWORD attribs = isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
                             
                             DWORD dwStyle = GetWindowLong(data->listView, GWL_STYLE);
                             DWORD dwView = dwStyle & LVS_TYPEMASK;
@@ -734,7 +731,7 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
 
                             if (GetFileAttributesW(fullPath) == INVALID_FILE_ATTRIBUTES) {
                                 iconFlags |= SHGFI_USEFILEATTRIBUTES;
-                                SHGetFileInfoW(res->Name, attribs, &sfiLocal, sizeof(sfiLocal), iconFlags);
+                                SHGetFileInfoW(res->Record->Name, attribs, &sfiLocal, sizeof(sfiLocal), iconFlags);
                             } else {
                                 SHGetFileInfoW(fullPath, attribs, &sfiLocal, sizeof(sfiLocal), iconFlags);
                             }
@@ -859,11 +856,14 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     DeleteObject(hBgBrush);
 
                                     const SearchResult* res = &data->results.data[itemIdx];
+                                    if (!res->Record) return 0;
+
+                                    bool isDir = (res->Record->Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
                                     // Retrieve small icon
                                     SHFILEINFOW sfiLocal;
-                                    DWORD attribs = res->IsDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
-                                    SHGetFileInfoW(res->Name, attribs, &sfiLocal, sizeof(sfiLocal), 
+                                    DWORD attribs = isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                                    SHGetFileInfoW(res->Record->Name, attribs, &sfiLocal, sizeof(sfiLocal), 
                                                    SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
 
                                     HIMAGELIST hSmallImgList = ListView_GetImageList(data->listView, LVSIL_SMALL);
@@ -881,7 +881,7 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     rc.left += 24; // padding offset for icon
 
                                     // Split words for text term highlights
-                                    const wchar_t* name = res->Name;
+                                    const wchar_t* name = res->Record->Name;
                                     size_t nameLen = wcslen(name);
                                     
                                     wchar_t* nameLower = (wchar_t*)malloc((nameLen + 1) * sizeof(wchar_t));
@@ -1351,6 +1351,7 @@ bool SearchView_ExportResults(HWND hwndView, const wchar_t* filePath) {
 
     for (size_t i = 0; i < data->results.count; i++) {
         const SearchResult* res = &data->results.data[i];
+        if (!res->Record) continue;
 
         wchar_t fullPath[MAX_PATH];
         SearchEngine_GetResultFullPath(data->searchEngine, res, fullPath, MAX_PATH);
@@ -1359,13 +1360,15 @@ bool SearchView_ExportResults(HWND hwndView, const wchar_t* filePath) {
         wchar_t sizeDiskStr[64] = { 0 };
         wchar_t modStr[64] = { 0 };
 
-        if (!res->IsDirectory) {
-            FormatFileSize(res->Size, sizeStr, 64);
-            FormatFileSize(res->SizeOnDisk, sizeDiskStr, 64);
-        }
-        FormatFileTime(res->DateModified, modStr, 64);
+        bool isDir = (res->Record->Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
-        EscapeVal(isCsv, res->Name, escName, 260);
+        if (!isDir) {
+            FormatFileSize(res->Record->Size, sizeStr, 64);
+            FormatFileSize(res->Record->Size, sizeDiskStr, 64);
+        }
+        FormatFileTime(res->Record->DateModified, modStr, 64);
+
+        EscapeVal(isCsv, res->Record->Name, escName, 260);
         EscapeVal(isCsv, fullPath, escPath, MAX_PATH);
         EscapeVal(isCsv, sizeStr, escSize, 64);
         EscapeVal(isCsv, sizeDiskStr, escSizeDisk, 64);
