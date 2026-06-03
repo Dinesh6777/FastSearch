@@ -7,15 +7,21 @@
 #include <commdlg.h>
 #include <dbt.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <exdisp.h>
 #include <process.h>
 
 #define WM_SEARCH_RESULTS_CHANGED (WM_USER + 101)
 #define WM_NTFS_INDEX_CHANGED (WM_USER + 102)
 #define WM_TRAYICON (WM_USER + 105)
 #define WM_SORTING_STATUS (WM_USER + 106)
+#define WM_HOTKEY_TRIGGERED (WM_USER + 200)
 
 // DBT Volume interface GUID
 static const GUID GUID_DEVINTERFACE_VOLUME_LOCAL = { 0x53f5630d, 0xb6bf, 0x11d0, {0x94, 0xf2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b} };
+
+static HWND g_hMainFrameWnd = NULL;
+static HHOOK hKeyboardHook = NULL;
 
 // Declarations of local functions
 static void CreateNewTab(MainFrameData* data, const wchar_t* name);
@@ -91,110 +97,7 @@ static void FrameOnIndexComplete(void* context, wchar_t drive, bool success, uns
     }
 }
 
-// Dynamic Minidump writer helper
-static void WriteHangMinidump(void) {
-    HMODULE hDbgHelp = LoadLibraryW(L"dbghelp.dll");
-    if (!hDbgHelp) {
-        LOG_ERROR(L"Watchdog: dbghelp.dll could not be loaded. Cannot write minidump.");
-        return;
-    }
 
-    typedef BOOL (WINAPI* MINIDUMPWRITEDUMP)(
-        HANDLE hProcess,
-        DWORD ProcessId,
-        HANDLE hFile,
-        int DumpType,
-        void* ExceptionParam,
-        void* UserStreamParam,
-        void* CallbackParam
-    );
-
-    MINIDUMPWRITEDUMP pDump = (MINIDUMPWRITEDUMP)GetProcAddress(hDbgHelp, "MiniDumpWriteDump");
-    if (!pDump) {
-        LOG_ERROR(L"Watchdog: MiniDumpWriteDump function not found in dbghelp.dll.");
-        FreeLibrary(hDbgHelp);
-        return;
-    }
-
-    // Resolve portable path for FastSearch_Hang.dmp
-    wchar_t dumpPath[MAX_PATH];
-    GetModuleFileNameW(NULL, dumpPath, MAX_PATH);
-    wchar_t* lastSlash = wcsrchr(dumpPath, L'\\');
-    if (lastSlash) {
-        *(lastSlash + 1) = L'\0';
-    }
-    wcscat_s(dumpPath, MAX_PATH, L"FastSearch_Hang.dmp");
-
-    HANDLE hFile = CreateFileW(
-        dumpPath,
-        GENERIC_WRITE,
-        0,
-        NULL,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
-
-    if (hFile != INVALID_HANDLE_VALUE) {
-        // MiniDumpWithDataSegs | MiniDumpWithHandleData | MiniDumpWithThreadInfo
-        BOOL success = pDump(
-            GetCurrentProcess(),
-            GetCurrentProcessId(),
-            hFile,
-            0x00000001 | 0x00000004 | 0x00000100, // standard minidump flags
-            NULL,
-            NULL,
-            NULL
-        );
-        CloseHandle(hFile);
-        if (success) {
-            LOG_ERROR(L"Watchdog: Created crash/hang minidump at '%s'. Open it in Visual Studio to debug!", dumpPath);
-        } else {
-            LOG_ERROR(L"Watchdog: MiniDumpWriteDump failed with error %d.", GetLastError());
-        }
-    } else {
-        LOG_ERROR(L"Watchdog: Failed to create minidump file at '%s'. Error: %d", dumpPath, GetLastError());
-    }
-
-    FreeLibrary(hDbgHelp);
-}
-
-static unsigned int __stdcall WatchdogThreadProc(void* arg) {
-    HWND hwnd = (HWND)arg;
-    bool wasHung = false;
-    LOG_INFO(L"Watchdog: UI Thread monitor started.");
-
-    while (IsWindow(hwnd)) {
-        Sleep(2000); // Check every 2 seconds
-        if (!IsWindow(hwnd)) break;
-
-        DWORD_PTR result = 0;
-        // Ping the main UI thread with a 3-second timeout
-        LRESULT res = SendMessageTimeoutW(
-            hwnd,
-            WM_NULL, // safe no-op message
-            0, 0,
-            SMTO_BLOCK | SMTO_ABORTIFHUNG,
-            3000, // 3 seconds timeout
-            &result
-        );
-
-        if (res == 0) {
-            if (!wasHung) {
-                LOG_ERROR(L"Watchdog: Main UI Thread is NOT RESPONDING (frozen / hung!)");
-                wasHung = true;
-                WriteHangMinidump();
-            }
-        } else {
-            if (wasHung) {
-                LOG_INFO(L"Watchdog: Main UI Thread recovered and is now responsive.");
-                wasHung = false;
-            }
-        }
-    }
-    LOG_INFO(L"Watchdog: UI Thread monitor stopped.");
-    return 0;
-}
 
 static bool IsStartupEnabled(void) {
     HKEY hKey;
@@ -230,6 +133,35 @@ static void SetStartupEnabled(bool enable) {
     }
 }
 
+// No Explorer integration functions needed
+
+static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        KBDLLHOOKSTRUCT* pKeyInfo = (KBDLLHOOKSTRUCT*)lParam;
+        if (pKeyInfo && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+            bool winDown = (GetAsyncKeyState(VK_LWIN) & 0x8000) || (GetAsyncKeyState(VK_RWIN) & 0x8000);
+            bool ctrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000);
+            bool shiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000);
+            bool altDown = (GetAsyncKeyState(VK_MENU) & 0x8000);
+
+            // 1. Intercept Win + F globally to restore and focus (Option 2)
+            if (pKeyInfo->vkCode == 'F' && winDown && !ctrlDown && !shiftDown && !altDown) {
+                if (g_hMainFrameWnd && IsWindow(g_hMainFrameWnd)) {
+                    // Suppress Start Menu on Win key release by sending dummy Ctrl keystrokes
+                    keybd_event(VK_LCONTROL, 0, 0, 0);
+                    keybd_event(VK_LCONTROL, 0, KEYEVENTF_KEYUP, 0);
+
+                    // Post trigger asynchronously to main window (wParam=2 signifies Win+F)
+                    PostMessageW(g_hMainFrameWnd, WM_HOTKEY_TRIGGERED, 2, 0);
+                    return 1; // Swallow key stroke so OS Feedback Hub is bypassed!
+                }
+            }
+
+        }
+    }
+    return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
+}
+
 // Main Frame window procedure
 static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     MainFrameData* data = (MainFrameData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
@@ -244,7 +176,9 @@ static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             data->columnMask = COL_DEFAULT;
 
             CREATESTRUCTW* pcs = (CREATESTRUCTW*)lParam;
-            data->searchEngine = (SearchEngine*)pcs->lpCreateParams;
+            MainFrameCreateParams* params = (MainFrameCreateParams*)pcs->lpCreateParams;
+            data->searchEngine = params->engine;
+            const wchar_t* initialPath = params->initialPath;
 
             SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)data);
 
@@ -293,6 +227,15 @@ static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
 
             // Create default initial search pane
             CreateNewTab(data, L"Search 1");
+            if (initialPath && initialPath[0] != L'\0') {
+                SearchView_SetSearchText(data->tabs[0].View, initialPath);
+                data->searchEngine->matchPath = true;
+                HMENU hMenu = GetMenu(hWnd);
+                if (hMenu) {
+                    CheckMenuItem(hMenu, ID_OPTIONS_MATCH_PATH, MF_CHECKED);
+                }
+                SearchView_TriggerSearch(data->tabs[0].View);
+            }
 
             // Append "+" tab at the end of tab control headers
             TCITEMW plusItem = { 0 };
@@ -310,6 +253,15 @@ static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
                 CheckMenuItem(hMenu, ID_OPTIONS_STARTUP, IsStartupEnabled() ? MF_CHECKED : MF_UNCHECKED);
             }
 
+            // Cleanup any leftover legacy explorer integration registry keys
+            RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\Folder\\shell\\find\\command");
+            RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\Folder\\shell\\find");
+            RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\Directory\\shell\\find\\command");
+            RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\Directory\\shell\\find");
+            RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\Drive\\shell\\find\\command");
+            RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\Drive\\shell\\find");
+            SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
+
             // Register PnP external volume device arrivals/removals
             DEV_BROADCAST_DEVICEINTERFACE notificationFilter;
             ZeroMemory(&notificationFilter, sizeof(notificationFilter));
@@ -323,11 +275,14 @@ static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
                 DEVICE_NOTIFY_WINDOW_HANDLE
             );
 
-            // Spawn the UI freeze Watchdog background thread
-            HANDLE hWatchdog = (HANDLE)_beginthreadex(NULL, 0, WatchdogThreadProc, (void*)hWnd, 0, NULL);
-            if (hWatchdog) {
-                CloseHandle(hWatchdog); // Detach thread
-            }
+
+
+            // Set global window pointer and register low-level keyboard hook
+            g_hMainFrameWnd = hWnd;
+            hKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(NULL), 0);
+
+            // Register global backup hotkey: Ctrl + Shift + F
+            RegisterHotKey(hWnd, 2, MOD_CONTROL | MOD_SHIFT, 'F');
 
             return 0;
         }
@@ -593,7 +548,7 @@ static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
                 }
             }
             else if (id == ID_HELP_ABOUT) {
-                MessageBoxW(hWnd, L"FastSearch File Indexer v1.1.0\n\nBuilt in C utilizing raw Win32 APIs.\nNTFS MFT pre-sorted contiguous indexing completes searches in milliseconds.", 
+                MessageBoxW(hWnd, L"FastSearch File Indexer v1.2.0\n\nBuilt in C utilizing raw Win32 APIs.\nNTFS MFT pre-sorted contiguous indexing completes searches in milliseconds.", 
                             L"About FastSearch", MB_OK | MB_ICONINFORMATION);
             }
             else if (id == ID_HELP_ENABLE_LOGGING) {
@@ -646,7 +601,49 @@ static LRESULT CALLBACK MainFrameWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             }
             return 0;
         }
+        case WM_HOTKEY: {
+            if (wParam == 2 && data) {
+                // Restore window if minimized
+                if (IsIconic(hWnd)) {
+                    ShowWindow(hWnd, SW_RESTORE);
+                } else {
+                    ShowWindow(hWnd, SW_SHOW);
+                }
+                SetForegroundWindow(hWnd);
+                
+                // Focus active search edit box
+                if (data->activeTabIndex != -1 && data->activeTabIndex < data->tabsCount) {
+                    SetFocus(data->tabs[data->activeTabIndex].View);
+                }
+            }
+            break;
+        }
+        case WM_HOTKEY_TRIGGERED: {
+            if (data) {
+                // Restore window if minimized
+                if (IsIconic(hWnd)) {
+                    ShowWindow(hWnd, SW_RESTORE);
+                } else {
+                    ShowWindow(hWnd, SW_SHOW);
+                }
+                SetForegroundWindow(hWnd);
+
+                if (wParam == 2) {
+                    // Focus active search edit box
+                    if (data->activeTabIndex != -1 && data->activeTabIndex < data->tabsCount) {
+                        SetFocus(data->tabs[data->activeTabIndex].View);
+                    }
+                }
+            }
+            return 0;
+        }
         case WM_DESTROY: {
+            if (hKeyboardHook) {
+                UnhookWindowsHookEx(hKeyboardHook);
+                hKeyboardHook = NULL;
+            }
+            g_hMainFrameWnd = NULL;
+            UnregisterHotKey(hWnd, 2);
             if (data) {
                 if (data->hDevNotify) UnregisterDeviceNotification(data->hDevNotify);
                 RemoveTrayIcon(data);
@@ -683,13 +680,17 @@ bool MainFrame_RegisterClass(void) {
     return RegisterClassExW(&wcex) != 0;
 }
 
-HWND MainFrame_Create(SearchEngine* engine) {
+HWND MainFrame_Create(SearchEngine* engine, const wchar_t* initialPath) {
+    static MainFrameCreateParams params;
+    params.engine = engine;
+    params.initialPath = initialPath;
+
     // 780x550 default size
     return CreateWindowExW(
         0, L"CMainFrameClass", L"FastSearch",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 780, 550,
-        NULL, NULL, GetModuleHandle(NULL), engine
+        NULL, NULL, GetModuleHandle(NULL), &params
     );
 }
 

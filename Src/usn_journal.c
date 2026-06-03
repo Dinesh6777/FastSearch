@@ -222,7 +222,7 @@ static unsigned int __stdcall MonitorThreadProc(void* arg) {
             wchar_t name[260];
             int nameLen = record->FileNameLength / sizeof(wchar_t);
             if (nameLen >= 260) nameLen = 259;
-            wcsncpy_s(name, 260, (wchar_t*)((char*)record + record->FileNameOffset), nameLen);
+            memcpy(name, (wchar_t*)((char*)record + record->FileNameOffset), nameLen * sizeof(wchar_t));
             name[nameLen] = L'\0';
 
             bool isDir = (record->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -240,14 +240,15 @@ static unsigned int __stdcall MonitorThreadProc(void* arg) {
                 unsigned long long dateAccessed = 0;
 
                 // Zero-allocation parent path query
-                wchar_t parentPath[MAX_PATH];
-                NtfsIndex_ResolveFullPathToBufByFrs(pThis->m_index, parentFrs, parentPath, MAX_PATH);
+                wchar_t parentPath[4096];
+                NtfsIndex_ResolveFullPathToBufByFrs(pThis->m_index, parentFrs, parentPath, 4096);
 
-                wchar_t fullPath[MAX_PATH];
-                if (wcslen(parentPath) > 0 && parentPath[wcslen(parentPath) - 1] == L'\\') {
-                    swprintf_s(fullPath, MAX_PATH, L"%s%s", parentPath, name);
+                wchar_t fullPath[4096];
+                size_t parentLen = wcslen(parentPath);
+                if (parentLen > 0 && parentPath[parentLen - 1] == L'\\') {
+                    _snwprintf_s(fullPath, 4096, _TRUNCATE, L"%s%s", parentPath, name);
                 } else {
-                    swprintf_s(fullPath, MAX_PATH, L"%s\\%s", parentPath, name);
+                    _snwprintf_s(fullPath, 4096, _TRUNCATE, L"%s\\%s", parentPath, name);
                 }
 
                 WIN32_FILE_ATTRIBUTE_DATA fad;

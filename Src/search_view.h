@@ -56,6 +56,7 @@ HWND SearchView_Create(HWND hwndParent, SearchEngine* engine);
 
 void SearchView_UpdateColumns(HWND hwndView, unsigned int columnMask);
 void SearchView_TriggerSearch(HWND hwndView);
+void SearchView_SetSearchText(HWND hwndView, const wchar_t* text);
 
 size_t SearchView_GetResultCount(HWND hwndView);
 double SearchView_GetLastSearchTimeMs(HWND hwndView);

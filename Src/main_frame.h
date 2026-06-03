@@ -5,6 +5,11 @@
 #include "search_engine.h"
 
 typedef struct {
+    SearchEngine* engine;
+    const wchar_t* initialPath;
+} MainFrameCreateParams;
+
+typedef struct {
     wchar_t Name[64];
     HWND View;
 } FrameTabContext;
@@ -27,6 +32,6 @@ typedef struct {
 bool MainFrame_RegisterClass(void);
 
 // Creates main frame window instance
-HWND MainFrame_Create(SearchEngine* engine);
+HWND MainFrame_Create(SearchEngine* engine, const wchar_t* initialPath);
 
 #endif // MAIN_FRAME_H

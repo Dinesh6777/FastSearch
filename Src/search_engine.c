@@ -355,8 +355,8 @@ bool SearchEngine_ExecuteSearch(SearchEngine* engine, const StringMatcher* match
                 bool matched = false;
                 if (engine->matchPath) {
                     // Match Path: Resolve full canonical path in zero-allocations stack buffer in O(1)
-                    wchar_t fullPath[MAX_PATH];
-                    NtfsIndex_ResolveFullPathToBuf(pIndex, item, fullPath, MAX_PATH);
+                    wchar_t fullPath[4096];
+                    NtfsIndex_ResolveFullPathToBuf(pIndex, item, fullPath, 4096);
                     matched = StringMatcher_Matches(matcher, fullPath);
                 } else {
                     matched = StringMatcher_Matches(matcher, item->Name);

@@ -47,8 +47,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 
+    // Parse command line for optional -path parameter
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    wchar_t initialPath[MAX_PATH] = { 0 };
+    if (argv) {
+        for (int i = 1; i < argc - 1; ++i) {
+            if (_wcsicmp(argv[i], L"-path") == 0) {
+                wcscpy_s(initialPath, MAX_PATH, argv[i + 1]);
+                break;
+            }
+        }
+        LocalFree(argv);
+    }
+
     // 5. Create Main Frame
-    HWND hwndFrame = MainFrame_Create(engine);
+    HWND hwndFrame = MainFrame_Create(engine, initialPath);
     if (!hwndFrame) {
         MessageBoxW(NULL, L"Failed to create MainFrame Window.", L"Error", MB_OK | MB_ICONERROR);
         SearchEngine_Destroy(engine);

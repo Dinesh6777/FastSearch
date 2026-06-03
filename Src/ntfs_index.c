@@ -387,7 +387,7 @@ void NtfsIndex_ProcessMftChunk(NtfsIndex* index, unsigned char* chunkBuffer, siz
                     size_t nameLen = fnInfo->FileNameLength;
                     FileRecord* item = NtfsIndex_ArenaAlloc(index, sizeof(FileRecord) + (nameLen + 1) * sizeof(wchar_t));
                     if (item) {
-                        wcsncpy_s(item->Name, nameLen + 1, fnInfo->FileName, nameLen);
+                        memcpy(item->Name, fnInfo->FileName, nameLen * sizeof(wchar_t));
                         item->Name[nameLen] = L'\0';
                         item->Frs = frsIndex;
                         item->ParentFrs = (unsigned int)(fnInfo->ParentDirectory & 0x0000FFFFFFFFFFFFLL);
@@ -414,7 +414,7 @@ void NtfsIndex_ProcessMftChunk(NtfsIndex* index, unsigned char* chunkBuffer, siz
                 size_t nameLen = fnInfo->FileNameLength;
                 FileRecord* item = NtfsIndex_ArenaAlloc(index, sizeof(FileRecord) + (nameLen + 1) * sizeof(wchar_t));
                 if (item) {
-                    wcsncpy_s(item->Name, nameLen + 1, fnInfo->FileName, nameLen);
+                    memcpy(item->Name, fnInfo->FileName, nameLen * sizeof(wchar_t));
                     item->Name[nameLen] = L'\0';
                     item->Frs = frsIndex;
                     item->ParentFrs = (unsigned int)(fnInfo->ParentDirectory & 0x0000FFFFFFFFFFFFLL);
@@ -551,11 +551,15 @@ size_t NtfsIndex_ResolveFullPathToBuf(const NtfsIndex* index, const FileRecord* 
 }
 
 size_t NtfsIndex_ResolveFullPathToBufByFrs(const NtfsIndex* index, unsigned int recordIndex, wchar_t* outBuf, size_t maxChars) {
+    NtfsIndex_LockShared((NtfsIndex*)index);
     if (recordIndex >= index->recordsCount) {
         if (maxChars > 0) outBuf[0] = L'\0';
+        NtfsIndex_UnlockShared((NtfsIndex*)index);
         return 0;
     }
-    return NtfsIndex_ResolveFullPathToBuf(index, NtfsIndex_GetRecord(index, recordIndex), outBuf, maxChars);
+    size_t result = NtfsIndex_ResolveFullPathToBuf(index, NtfsIndex_GetRecord(index, recordIndex), outBuf, maxChars);
+    NtfsIndex_UnlockShared((NtfsIndex*)index);
+    return result;
 }
 
 size_t NtfsIndex_ResolveFullPathFromParent(const NtfsIndex* index, unsigned int parentFrs, const wchar_t* name, wchar_t* outBuf, size_t maxChars) {

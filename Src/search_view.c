@@ -114,14 +114,20 @@ static LRESULT CALLBACK ListSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
                     if (files) {
                         int idx = -1;
                         size_t k = 0;
+                        EnterCriticalSection(&data->searchInputMutex);
                         while ((idx = ListView_GetNextItem(hWnd, idx, LVNI_SELECTED)) != -1) {
-                            wchar_t* path = (wchar_t*)malloc(MAX_PATH * sizeof(wchar_t));
-                            if (path) {
-                                SearchEngine_GetResultFullPath(data->searchEngine, &data->results.data[idx], path, MAX_PATH);
-                                files[k++] = path;
+                            if (idx >= 0 && idx < (int)data->results.count && data->results.data) {
+                                wchar_t* path = (wchar_t*)malloc(MAX_PATH * sizeof(wchar_t));
+                                if (path) {
+                                    SearchEngine_GetResultFullPath(data->searchEngine, &data->results.data[idx], path, MAX_PATH);
+                                    files[k++] = path;
+                                }
                             }
                         }
-                        ShellIntegration_CopyFilesToClipboard(data->hWnd, files, k, true);
+                        LeaveCriticalSection(&data->searchInputMutex);
+                        if (k > 0) {
+                            ShellIntegration_CopyFilesToClipboard(data->hWnd, files, k, true);
+                        }
                         for (size_t i = 0; i < k; i++) free((void*)files[i]);
                         free(files);
                     }
@@ -143,9 +149,17 @@ static LRESULT CALLBACK ListSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         else if (key == VK_RETURN) {
             // Run/execute active search result
             int selIdx = ListView_GetNextItem(hWnd, -1, LVNI_SELECTED);
-            if (selIdx != -1 && selIdx < (int)data->results.count) {
-                wchar_t path[MAX_PATH];
+            wchar_t path[MAX_PATH] = { 0 };
+            bool hasPath = false;
+
+            EnterCriticalSection(&data->searchInputMutex);
+            if (selIdx != -1 && selIdx < (int)data->results.count && data->results.data) {
                 SearchEngine_GetResultFullPath(data->searchEngine, &data->results.data[selIdx], path, MAX_PATH);
+                hasPath = true;
+            }
+            LeaveCriticalSection(&data->searchInputMutex);
+
+            if (hasPath && path[0] != L'\0') {
                 ShellExecuteW(NULL, L"open", path, NULL, NULL, SW_SHOWNORMAL);
             }
             return 0;
@@ -163,34 +177,41 @@ static LRESULT CALLBACK ListSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
                 if (paths) {
                     int sIdx = -1;
                     int k = 0;
+                    EnterCriticalSection(&data->searchInputMutex);
                     while ((sIdx = ListView_GetNextItem(hWnd, sIdx, LVNI_SELECTED)) != -1) {
-                        wchar_t* path = (wchar_t*)malloc(MAX_PATH * sizeof(wchar_t));
-                        if (path) {
-                            SearchEngine_GetResultFullPath(data->searchEngine, &data->results.data[sIdx], path, MAX_PATH);
-                            paths[k++] = path;
-                            totalLen += wcslen(path) + 1;
+                        if (sIdx >= 0 && sIdx < (int)data->results.count && data->results.data) {
+                            wchar_t* path = (wchar_t*)malloc(MAX_PATH * sizeof(wchar_t));
+                            if (path) {
+                                SearchEngine_GetResultFullPath(data->searchEngine, &data->results.data[sIdx], path, MAX_PATH);
+                                paths[k++] = path;
+                                totalLen += wcslen(path) + 1;
+                            }
                         }
                     }
-                    totalLen += 1;
-                    wchar_t* doubleNullBuf = (wchar_t*)calloc(totalLen, sizeof(wchar_t));
-                    if (doubleNullBuf) {
-                        size_t offset = 0;
-                        for (int i = 0; i < k; i++) {
-                            wcscpy_s(doubleNullBuf + offset, totalLen - offset, paths[i]);
-                            offset += wcslen(paths[i]) + 1;
+                    LeaveCriticalSection(&data->searchInputMutex);
+
+                    if (k > 0) {
+                        totalLen += 1;
+                        wchar_t* doubleNullBuf = (wchar_t*)calloc(totalLen, sizeof(wchar_t));
+                        if (doubleNullBuf) {
+                            size_t offset = 0;
+                            for (int i = 0; i < k; i++) {
+                                wcscpy_s(doubleNullBuf + offset, totalLen - offset, paths[i]);
+                                offset += wcslen(paths[i]) + 1;
+                            }
+                            doubleNullBuf[offset] = L'\0';
+                            SHFILEOPSTRUCTW fileOp = { 0 };
+                            fileOp.hwnd = GetParent(hWnd);
+                            fileOp.wFunc = FO_DELETE;
+                            fileOp.pFrom = doubleNullBuf;
+                            fileOp.pTo = NULL;
+                            fileOp.fFlags = FOF_NOCONFIRMMKDIR;
+                            if (!shift) {
+                                fileOp.fFlags |= FOF_ALLOWUNDO;
+                            }
+                            SHFileOperationW(&fileOp);
+                            free(doubleNullBuf);
                         }
-                        doubleNullBuf[offset] = L'\0';
-                        SHFILEOPSTRUCTW fileOp = { 0 };
-                        fileOp.hwnd = GetParent(hWnd);
-                        fileOp.wFunc = FO_DELETE;
-                        fileOp.pFrom = doubleNullBuf;
-                        fileOp.pTo = NULL;
-                        fileOp.fFlags = FOF_NOCONFIRMMKDIR;
-                        if (!shift) {
-                            fileOp.fFlags |= FOF_ALLOWUNDO;
-                        }
-                        SHFileOperationW(&fileOp);
-                        free(doubleNullBuf);
                     }
                     for (int i = 0; i < k; i++) free(paths[i]);
                     free(paths);
@@ -676,10 +697,18 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                     case LVN_GETDISPINFOW: {
                         NMLVDISPINFO* pDispInfo = (NMLVDISPINFO*)lParam;
                         int idx = pDispInfo->item.iItem;
-                        if (idx < 0 || idx >= (int)data->results.count) return 0;
+                        
+                        EnterCriticalSection(&data->searchInputMutex);
+                        if (idx < 0 || idx >= (int)data->results.count || !data->results.data) {
+                            LeaveCriticalSection(&data->searchInputMutex);
+                            return 0;
+                        }
 
                         const SearchResult* res = &data->results.data[idx];
-                        if (!res->Record) return 0;
+                        if (!res->Record) {
+                            LeaveCriticalSection(&data->searchInputMutex);
+                            return 0;
+                        }
 
                         bool isDir = (res->Record->Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
@@ -738,6 +767,7 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                             pDispInfo->item.iImage = sfiLocal.iIcon;
                         }
 
+                        LeaveCriticalSection(&data->searchInputMutex);
                         return 0;
                     }
                     case LVN_COLUMNCLICK: {
@@ -758,30 +788,41 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                         int selIdx = ListView_GetNextItem(data->listView, -1, LVNI_SELECTED);
                         if (selIdx == -1) return 0;
 
-                        const SearchResult* res = &data->results.data[selIdx];
-                        wchar_t fullPath[MAX_PATH];
-                        SearchEngine_GetResultFullPath(data->searchEngine, res, fullPath, MAX_PATH);
+                        wchar_t fullPath[MAX_PATH] = { 0 };
+                        bool hasPath = false;
 
-                        // Subitem hit-testing to see what column was double-clicked
-                        DWORD pos = GetMessagePos();
-                        POINT pt;
-                        pt.x = GET_X_LPARAM(pos);
-                        pt.y = GET_Y_LPARAM(pos);
-                        ScreenToClient(data->listView, &pt);
+                        EnterCriticalSection(&data->searchInputMutex);
+                        if (selIdx >= 0 && selIdx < (int)data->results.count && data->results.data) {
+                            const SearchResult* res = &data->results.data[selIdx];
+                            if (res->Record) {
+                                SearchEngine_GetResultFullPath(data->searchEngine, res, fullPath, MAX_PATH);
+                                hasPath = true;
+                            }
+                        }
+                        LeaveCriticalSection(&data->searchInputMutex);
 
-                        LVHITTESTINFO hti;
-                        hti.pt = pt;
-                        ListView_SubItemHitTest(data->listView, &hti);
+                        if (hasPath && fullPath[0] != L'\0') {
+                            // Subitem hit-testing to see what column was double-clicked
+                            DWORD pos = GetMessagePos();
+                            POINT pt;
+                            pt.x = GET_X_LPARAM(pos);
+                            pt.y = GET_Y_LPARAM(pos);
+                            ScreenToClient(data->listView, &pt);
 
-                        if (hti.iSubItem >= 0 && hti.iSubItem < data->visibleColumnsCount && 
-                            data->visibleColumns[hti.iSubItem].subitemIndex == COL_PATH) {
-                            // Double-clicked path: open containing folder and select the item
-                            wchar_t arg[512];
-                            swprintf_s(arg, 512, L"/select,\"%s\"", fullPath);
-                            ShellExecuteW(NULL, L"open", L"explorer.exe", arg, NULL, SW_SHOWNORMAL);
-                        } else {
-                            // Double-clicked filename: launch it standard
-                            ShellExecuteW(NULL, L"open", fullPath, NULL, NULL, SW_SHOWNORMAL);
+                            LVHITTESTINFO hti;
+                            hti.pt = pt;
+                            ListView_SubItemHitTest(data->listView, &hti);
+
+                            if (hti.iSubItem >= 0 && hti.iSubItem < data->visibleColumnsCount && 
+                                data->visibleColumns[hti.iSubItem].subitemIndex == COL_PATH) {
+                                // Double-clicked path: open containing folder and select the item
+                                wchar_t arg[512];
+                                swprintf_s(arg, 512, L"/select,\"%s\"", fullPath);
+                                ShellExecuteW(NULL, L"open", L"explorer.exe", arg, NULL, SW_SHOWNORMAL);
+                            } else {
+                                // Double-clicked filename: launch it standard
+                                ShellExecuteW(NULL, L"open", fullPath, NULL, NULL, SW_SHOWNORMAL);
+                            }
                         }
                         return 0;
                     }
@@ -797,14 +838,20 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                             if (files) {
                                 int sIdx = -1;
                                 size_t k = 0;
+                                EnterCriticalSection(&data->searchInputMutex);
                                 while ((sIdx = ListView_GetNextItem(data->listView, sIdx, LVNI_SELECTED)) != -1) {
-                                    wchar_t* path = (wchar_t*)malloc(MAX_PATH * sizeof(wchar_t));
-                                    if (path) {
-                                        SearchEngine_GetResultFullPath(data->searchEngine, &data->results.data[sIdx], path, MAX_PATH);
-                                        files[k++] = path;
+                                    if (sIdx >= 0 && sIdx < (int)data->results.count && data->results.data) {
+                                        wchar_t* path = (wchar_t*)malloc(MAX_PATH * sizeof(wchar_t));
+                                        if (path) {
+                                            SearchEngine_GetResultFullPath(data->searchEngine, &data->results.data[sIdx], path, MAX_PATH);
+                                            files[k++] = path;
+                                        }
                                     }
                                 }
-                                DragDrop_CopyFilesToClipboardOrDrag(data->hWnd, files, k, true);
+                                LeaveCriticalSection(&data->searchInputMutex);
+                                if (k > 0) {
+                                    DragDrop_CopyFilesToClipboardOrDrag(data->hWnd, files, k, true);
+                                }
                                 for (size_t i = 0; i < k; i++) free((void*)files[i]);
                                 free(files);
                             }
@@ -830,8 +877,11 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                 int itemIdx = (int)pLVCD->nmcd.dwItemSpec;
                                 int subItemIdx = pLVCD->iSubItem;
 
+                                EnterCriticalSection(&data->searchInputMutex);
                                 if (itemIdx < 0 || itemIdx >= (int)data->results.count ||
+                                    !data->results.data ||
                                     subItemIdx < 0 || subItemIdx >= data->visibleColumnsCount) {
+                                    LeaveCriticalSection(&data->searchInputMutex);
                                     return CDRF_DODEFAULT;
                                 }
 
@@ -856,7 +906,10 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     DeleteObject(hBgBrush);
 
                                     const SearchResult* res = &data->results.data[itemIdx];
-                                    if (!res->Record) return 0;
+                                    if (!res->Record) {
+                                        LeaveCriticalSection(&data->searchInputMutex);
+                                        return 0;
+                                    }
 
                                     bool isDir = (res->Record->Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
@@ -902,7 +955,6 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     bool* highlighted = (bool*)calloc(nameLen + 1, sizeof(bool));
 
                                     if (nameLower && highlighted) {
-                                        EnterCriticalSection(&data->searchInputMutex);
                                         const StringMatcher* matcher = &data->highlightMatcher;
                                         for (int w = 0; w < matcher->wordsCount; w++) {
                                             const wchar_t* wL = matcher->wordsLower[w];
@@ -918,7 +970,6 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                                 p = wcsstr(p + 1, wL);
                                             }
                                         }
-                                        LeaveCriticalSection(&data->searchInputMutex);
                                     }
 
                                     // Print highlighted segments
@@ -978,10 +1029,12 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     if (highlighted) free(highlighted);
 
                                     SelectObject(hdc, hOldFont);
+                                    LeaveCriticalSection(&data->searchInputMutex);
                                     return CDRF_SKIPDEFAULT;
                                 } else {
                                     pLVCD->clrText = clrText;
                                     pLVCD->clrTextBk = clrBg;
+                                    LeaveCriticalSection(&data->searchInputMutex);
                                     return CDRF_DODEFAULT;
                                 }
                                 break;
@@ -1045,14 +1098,20 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                     if (files) {
                         int sIdx = -1;
                         size_t k = 0;
+                        EnterCriticalSection(&data->searchInputMutex);
                         while ((sIdx = ListView_GetNextItem(data->listView, sIdx, LVNI_SELECTED)) != -1) {
-                            wchar_t* path = (wchar_t*)malloc(MAX_PATH * sizeof(wchar_t));
-                            if (path) {
-                                SearchEngine_GetResultFullPath(data->searchEngine, &data->results.data[sIdx], path, MAX_PATH);
-                                files[k++] = path;
+                            if (sIdx >= 0 && sIdx < (int)data->results.count && data->results.data) {
+                                wchar_t* path = (wchar_t*)malloc(MAX_PATH * sizeof(wchar_t));
+                                if (path) {
+                                    SearchEngine_GetResultFullPath(data->searchEngine, &data->results.data[sIdx], path, MAX_PATH);
+                                    files[k++] = path;
+                                }
                             }
                         }
-                        ShellIntegration_ShowContextMenu(data->hWnd, files, k, ptCursor);
+                        LeaveCriticalSection(&data->searchInputMutex);
+                        if (k > 0) {
+                            ShellIntegration_ShowContextMenu(data->hWnd, files, k, ptCursor);
+                        }
                         for (size_t i = 0; i < k; i++) free((void*)files[i]);
                         free(files);
                     }
@@ -1200,14 +1259,29 @@ void SearchView_TriggerSearch(HWND hwndView) {
     if (data) RunSearchInternal(data);
 }
 
+void SearchView_SetSearchText(HWND hwndView, const wchar_t* text) {
+    SearchViewData* data = (SearchViewData*)GetWindowLongPtr(hwndView, GWLP_USERDATA);
+    if (data && data->searchEdit) {
+        SetWindowTextW(data->searchEdit, text);
+    }
+}
+
 size_t SearchView_GetResultCount(HWND hwndView) {
     SearchViewData* data = (SearchViewData*)GetWindowLongPtr(hwndView, GWLP_USERDATA);
-    return data ? data->results.count : 0;
+    if (!data) return 0;
+    EnterCriticalSection(&data->searchInputMutex);
+    size_t count = data->results.count;
+    LeaveCriticalSection(&data->searchInputMutex);
+    return count;
 }
 
 double SearchView_GetLastSearchTimeMs(HWND hwndView) {
     SearchViewData* data = (SearchViewData*)GetWindowLongPtr(hwndView, GWLP_USERDATA);
-    return data ? data->lastSearchTimeMs : 0.0;
+    if (!data) return 0.0;
+    EnterCriticalSection(&data->searchInputMutex);
+    double t = data->lastSearchTimeMs;
+    LeaveCriticalSection(&data->searchInputMutex);
+    return t;
 }
 
 void SearchView_SetViewMode(HWND hwndView, int mode) {
@@ -1318,14 +1392,20 @@ bool SearchView_ExportResults(HWND hwndView, const wchar_t* filePath) {
             if (files) {
                 int sIdx = -1;
                 size_t k = 0;
+                EnterCriticalSection(&data->searchInputMutex);
                 while ((sIdx = ListView_GetNextItem(data->listView, sIdx, LVNI_SELECTED)) != -1) {
-                    wchar_t* path = (wchar_t*)malloc(MAX_PATH * sizeof(wchar_t));
-                    if (path) {
-                        SearchEngine_GetResultFullPath(data->searchEngine, &data->results.data[sIdx], path, MAX_PATH);
-                        files[k++] = path;
+                    if (sIdx >= 0 && sIdx < (int)data->results.count && data->results.data) {
+                        wchar_t* path = (wchar_t*)malloc(MAX_PATH * sizeof(wchar_t));
+                        if (path) {
+                            SearchEngine_GetResultFullPath(data->searchEngine, &data->results.data[sIdx], path, MAX_PATH);
+                            files[k++] = path;
+                        }
                     }
                 }
-                ShellIntegration_CopyFilesToClipboard(data->hWnd, files, k, false);
+                LeaveCriticalSection(&data->searchInputMutex);
+                if (k > 0) {
+                    ShellIntegration_CopyFilesToClipboard(data->hWnd, files, k, false);
+                }
                 for (size_t i = 0; i < k; i++) free((void*)files[i]);
                 free(files);
             }
@@ -1358,7 +1438,9 @@ bool SearchView_ExportResults(HWND hwndView, const wchar_t* filePath) {
 
     fwprintf(file, L"%s%c%s%c%s%c%s%c%s\n", escName, sep, escPath, sep, escSize, sep, escSizeDisk, sep, escMod);
 
+    EnterCriticalSection(&data->searchInputMutex);
     for (size_t i = 0; i < data->results.count; i++) {
+        if (!data->results.data) break;
         const SearchResult* res = &data->results.data[i];
         if (!res->Record) continue;
 
@@ -1385,6 +1467,7 @@ bool SearchView_ExportResults(HWND hwndView, const wchar_t* filePath) {
 
         fwprintf(file, L"%s%c%s%c%s%c%s%c%s\n", escName, sep, escPath, sep, escSize, sep, escSizeDisk, sep, escMod);
     }
+    LeaveCriticalSection(&data->searchInputMutex);
 
     fclose(file);
     return true;
