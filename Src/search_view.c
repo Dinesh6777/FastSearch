@@ -943,8 +943,58 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
                                     rc.left += 24; // padding offset for icon
 
                                     // Split words for text term highlights
-                                    const wchar_t* name = res->Record->Name;
-                                    size_t nameLen = wcslen(name);
+                                    const wchar_t* originalName = res->Record->Name;
+                                    size_t originalNameLen = wcslen(originalName);
+
+                                    int availWidth = rc.right - rc.left - 4;
+                                    SIZE szTotal;
+                                    GetTextExtentPoint32W(hdc, originalName, (int)originalNameLen, &szTotal);
+
+                                    wchar_t* drawName = NULL;
+                                    size_t drawNameLen = 0;
+
+                                    if (szTotal.cx > availWidth) {
+                                        size_t low = 0;
+                                        size_t high = originalNameLen;
+                                        size_t fitLen = 0;
+                                        wchar_t* tempBuf = (wchar_t*)malloc((originalNameLen + 4) * sizeof(wchar_t));
+                                        if (tempBuf) {
+                                            while (low <= high) {
+                                                size_t mid = low + (high - low) / 2;
+                                                memcpy(tempBuf, originalName, mid * sizeof(wchar_t));
+                                                tempBuf[mid] = L'\0';
+                                                wcscat_s(tempBuf, originalNameLen + 4, L"...");
+                                                
+                                                SIZE sz;
+                                                GetTextExtentPoint32W(hdc, tempBuf, (int)wcslen(tempBuf), &sz);
+                                                if (sz.cx <= availWidth) {
+                                                    fitLen = mid;
+                                                    low = mid + 1;
+                                                } else {
+                                                    if (mid > 0) {
+                                                        high = mid - 1;
+                                                    } else {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            free(tempBuf);
+                                        }
+
+                                        drawNameLen = fitLen + 3;
+                                        drawName = (wchar_t*)malloc((drawNameLen + 1) * sizeof(wchar_t));
+                                        if (drawName) {
+                                            memcpy(drawName, originalName, fitLen * sizeof(wchar_t));
+                                            drawName[fitLen] = L'\0';
+                                            wcscat_s(drawName, drawNameLen + 1, L"...");
+                                        }
+                                    } else {
+                                        drawNameLen = originalNameLen;
+                                        drawName = _wcsdup(originalName);
+                                    }
+
+                                    const wchar_t* name = drawName ? drawName : L"";
+                                    size_t nameLen = drawNameLen;
                                     
                                     wchar_t* nameLower = (wchar_t*)malloc((nameLen + 1) * sizeof(wchar_t));
                                     if (nameLower) {
@@ -1027,6 +1077,7 @@ static LRESULT CALLBACK SearchViewWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
 
                                     if (nameLower) free(nameLower);
                                     if (highlighted) free(highlighted);
+                                    if (drawName) free(drawName);
 
                                     SelectObject(hdc, hOldFont);
                                     LeaveCriticalSection(&data->searchInputMutex);

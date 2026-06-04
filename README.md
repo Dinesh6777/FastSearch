@@ -1,8 +1,9 @@
 # 🚀 FastSearch
 
-**FastSearch** is an instant filename search engine that quickly locates files and folders by name on Windows. Searches 1 million files in 2 Seconds after indexing. 
-### How is Everything different from other File search engines
-* Small Portable installation file(<1MB).
+**FastSearch** is an instant filename search engine that quickly locates files and folders by name on Windows. Searches 1 million files in milliseconds after indexing. 
+
+### How is FastSearch different from other File search engines
+* Small Portable installation file (<1MB).
 * Clean and simple user interface.
 * Quick file indexing.
 * Quick searching.
@@ -10,26 +11,31 @@
 * Minimal resource usage.
 * No database on disk.
 * Real-time updating.
+
 #### [Download FastSearch from Releases](https://github.com/Dinesh6777/FastSearch/releases)
 <img width="923" height="545" alt="image" src="https://github.com/user-attachments/assets/f436600a-5a6f-4263-8eac-5000d71c962e" />
 
 ---
 
 ## ✨ Features
-FastSearch is built with modern C++, WTL (Windows Template Library), and ATL, it parses raw NTFS Master File Tables (MFT) directly to index millions of files in seconds, delivering high-performance, real-time search results with an incredibly compact memory footprint.
-*   **⚡ Sub-Second MFT Indexing**: Directly parses raw NTFS Master File Table (MFT) partitions using sector-aligned raw disk I/O, indexing over 1,000,000 files in under 10 seconds.
-*   **🧠 Ultra-Low Memory Footprint**: Consolidated RAM consumption down to under **90 MB** using a custom 8-byte `CompactString` pointer architecture, Contiguous sparse record storage, and zero-allocation dynamic result lookups.
+
+FastSearch is built in pure **C** utilizing raw **Win32 SDK APIs** (with no C++ runtime overhead, WTL, or ATL dependencies). It parses raw NTFS Master File Tables (MFT) directly to index millions of files in seconds, delivering high-performance, real-time search results with an incredibly compact memory footprint.
+
+*   **⚡ Sub-Second MFT Indexing**: Directly parses raw NTFS Master File Table (MFT) partitions using sector-aligned raw disk I/O, indexing over 1,000,000 files in seconds.
+*   **🧠 Ultra-Low Memory Footprint**: Consolidated RAM consumption down to under **50-80 MB** using a contiguous Page-Pool Arena Allocator, a 2-level paged sparse array for FRS mappings, and lightweight 16-byte `SearchResult` references.
 *   **🔄 Real-Time USN Synchronization**: Tracks all filesystem additions, deletions, renames, and attributes in real-time by reading the Windows Update Sequence Number (USN) Journal.
-*   **🔌 Stateless Hot-Plugging & Safe Ejection**: Implements a stateless on-demand polling mechanism and robust PnP device interface translations (GUID volume resolution). Instantly indexes newly attached USB drives and allows safe ejection on the very first click without locking the drive.
-*   **💻 Native Windows UI**: Built with a sleek, borderless WTL frame using Segoe UI typography, smooth micro-animations, customizable views (Details, Large Icons, Extra Large Icons), instant character highlighting, and seamless system tray minimization.
+*   **🔌 Stateless Hot-Plugging & Safe Ejection**: Implements a stateless on-demand polling mechanism and robust PnP device interface translations (GUID volume resolution). Instantly indexes newly attached USB drives and allows safe ejection without locking the drive.
+*   **💻 Native Windows UI**: Built with a custom native Win32 window frame using Segoe UI typography, smooth micro-animations, customizable views (Details, Small/Medium/Large/Extra Large Icons), instant character highlighting, and seamless system tray minimization.
 *   **📋 Full Explorer Bindings**: Supports standard Windows Clipboard operations (Copy, Cut, Paste) and full OLE Drag-and-Drop compatibility directly into Windows Explorer.
 *   **🔍 Multiple Match Modes**: Supports Plain Text, Wildcard matching (`*`, `?`), and regular expressions (Regex) in a thread-safe search interface.
+*   **⌨️ Global Win+F Hotkey**: Supports system-wide `Win+F` (utilizing a low-level keyboard hook with dummy control key injection to bypass the Windows Feedback Hub and suppress the Start Menu popup) and `Ctrl+Shift+F` shortcuts to instantly restore and focus the application.
+*   **🚀 Auto-Run on Startup**: Checkable menu option to run FastSearch on Windows logon via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, running fully in user space without requiring UAC elevation.
 
 ---
 
 ## 🏗️ Architecture Design
 
-FastSearch achieves high performance and low resource usage through several advanced memory and systems-engineering strategies:
+FastSearch achieves high performance and low resource usage through advanced memory and systems-engineering strategies:
 
 ```mermaid
 graph TD
@@ -37,42 +43,45 @@ graph TD
     B -->|Build contiguous index| C[NtfsIndex]
     D[OS File Changes] -->|USN Journal Log| E[Stateless USN Monitor]
     E -->|Incremental Updates| C
-    C -->|On-demand dynamically lookup| F[WTL Virtual ListView]
+    C -->|On-demand dynamically lookup| F[Win32 Virtual ListView]
     G[Search Queries] -->|Thread-Safe Query| H[SearchEngine]
     H -->|Lock-Free Search Matching| C
 ```
 
-1.  **Contiguous Contained Vector**: Stores file structures inside a flat contiguous vector (`std::vector<std::unique_ptr<FileRecord>>`) indexed by FRS (File Reference Segment) numbers, enabling O(1) random access lookups.
-2.  **CompactString (8-byte strings)**: Custom-engineered string class that replaces standard 40-byte `std::wstring` structures by managing a single 64-bit raw pointer, reducing structure size by 36%.
-3.  **On-Demand View Rendering**: The Virtual List View (`LVS_OWNERDATA`) retrieves visible row strings on-the-fly from the index via thread-safe shared locks, keeping search results at a lightweight 8 bytes per item.
+1.  **Page-Pool Arena Allocator**: Requesting large 4MB chunks from the OS using `malloc` and sequential-packing `FileRecord` structures contiguously. This eliminates individual heap headers, saving 30MB+ of RAM, and speeds up index destruction to a simple O(1) page-freeing loop.
+2.  **2-Level Paged Sparse Array**: Maps File Reference Segment (FRS) indices to `FileRecord` pointers using `recordsByFrsPages`. This prevents reserving massive flat pointer arrays, reducing memory overhead by hundreds of megabytes.
+3.  **On-Demand View Rendering**: The Virtual List View (`LVS_OWNERDATA`) retrieves visible row properties on-the-fly from the index via thread-safe shared locks (`SRWLOCK`), keeping search results at a lightweight 16 bytes per item.
+4.  **Dual-Array Pre-Sorted Indexing (Contiguous Active Scan Array)**: Instead of scanning a sparse lookup array which is slow, cache-unfriendly, and requires sorting matching items at query-time, FastSearch maintains a packed, contiguous pointer array (`activeRecords`) containing only active records. Upon indexing finalization, this array is sorted alphabetically by name. Searching becomes a cache-friendly sequential iteration over `activeRecords` that generates pre-sorted results instantly (completing in ~2-8ms), completely eliminating real-time sorting overhead.
 
 ---
 
 ## 🛠️ Getting Started
 
 ### System Requirements
-*   **OS**: Windows 10 or Windows 11 (64-bit)
+*   **OS**: Windows 10 or Windows 11 (64-bit or 32-bit)
 *   **Permissions**: Administrator elevation (required to perform raw sector read access on NTFS physical disks and query the USN Journal).
 *   **File System**: NTFS formatted partitions (FAT32/exFAT are not supported for raw MFT parsing).
 
 ### Build Prerequisites
-*   **IDE**: Visual Studio 2022 (with "Desktop development with C++" workload installed)
-*   **SDK**: Windows 10 SDK (10.0.17763.0 or higher)
-*   **Libraries**: WTL (Windows Template Library) NuGet package (automatically resolved on build)
+*   **Build Tools**: Visual Studio Build Tools / Visual Studio (with "Desktop development with C++" workload installed which includes the MSVC compiler).
+*   **SDK**: Windows 10 or Windows 11 SDK.
 
 ### Building the Project
-You can build the project directly using Visual Studio or from the command line using MSBuild:
+We provide a batch file to automatically initialize the Visual Studio environment and build both 64-bit (`x64`) and 32-bit (`x86`) native binaries:
 
-```powershell
-# Navigate to the source folder
-cd Src
+1. Open a standard command prompt (`cmd.exe`).
+2. Navigate to the build script directory:
+   ```cmd
+   cd Src\bin
+   ```
+3. Run the compiler script:
+   ```cmd
+   .\build_vs.bat
+   ```
 
-# Rebuild in Release mode for x64
-msbuild FastSearch.sln /p:Configuration=Release /p:Platform=x64 /t:Rebuild
-```
-
-The compiled binary will be generated at:
-`Src\x64\Release\FastSearch.exe`
+The script will produce the following optimized binaries and deploy them to the deployment directory:
+*   `PortableApp\FastSearch.exe` (x64 Version)
+*   `PortableApp\FastSearch_x86.exe` (x86 Version)
 
 ---
 
