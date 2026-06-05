@@ -19,7 +19,7 @@
 
 ## ✨ Features
 
-FastSearch is built in pure **C** utilizing raw **Win32 SDK APIs** (with no C++ runtime overhead, WTL, or ATL dependencies). It parses raw NTFS Master File Tables (MFT) directly to index millions of files in seconds, delivering high-performance, real-time search results with an incredibly compact memory footprint.
+FastSearch is built in pure **C** utilizing raw **Win32 SDK APIs**. It parses raw NTFS Master File Tables (MFT) directly to index millions of files in seconds, delivering high-performance, real-time search results with an incredibly compact memory footprint.
 
 *   **⚡ Sub-Second MFT Indexing**: Directly parses raw NTFS Master File Table (MFT) partitions using sector-aligned raw disk I/O, indexing over 1,000,000 files in seconds.
 *   **🧠 Ultra-Low Memory Footprint**: Consolidated RAM consumption down to under **50-80 MB** using a contiguous Page-Pool Arena Allocator, a 2-level paged sparse array for FRS mappings, and lightweight 16-byte `SearchResult` references.
